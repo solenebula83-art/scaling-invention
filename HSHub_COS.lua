@@ -2526,17 +2526,25 @@ assert(Stealth, 'HSHub_Stealth not loaded')
 -- ═══════════════════════════════════════════════════════════════════
 --   GAME GUARD
 -- ═══════════════════════════════════════════════════════════════════
+-- Normal CoS realm PlaceIds + Hardcore realm ("Sonaria: Alam Hardcore", PlaceId
+-- 136015760267602, confirmed by HardcoreEnvScan 2026-05-29). Hardcore exposes a
+-- 9th shrine (Shadow) and uses HardcoreDisaster* modules — autofarm needs to know.
 local COS_PLACEIDS = { [5233782396]=true, [4922741943]=true, [3963303927]=true }
+local HARDCORE_PLACEIDS = { [136015760267602]=true }
 local PLACE_ISLE10 = 3431407618
-local IS_ISLE10 = (game.PlaceId == PLACE_ISLE10)
-local IS_COS    = COS_PLACEIDS[game.PlaceId] == true
+local IS_ISLE10    = (game.PlaceId == PLACE_ISLE10)
+local IS_HARDCORE  = HARDCORE_PLACEIDS[game.PlaceId] == true
+local IS_COS       = (COS_PLACEIDS[game.PlaceId] == true) or IS_HARDCORE
 local NAME_OK = false
 if not IS_COS and not IS_ISLE10 then
     pcall(function()
         local info = game:GetService('MarketplaceService'):GetProductInfo(game.PlaceId)
         if info and info.Name then
             local n = info.Name:lower()
-            if n:find('sonaria') or n:find('isle 10') or n:find('creatures of') then NAME_OK = true end
+            if n:find('sonaria') or n:find('isle 10') or n:find('creatures of') or n:find('alam hardcore') then
+                NAME_OK = true
+                if n:find('hardcore') then IS_HARDCORE = true end
+            end
         end
     end)
 end
@@ -2836,10 +2844,18 @@ do
 end
 
 -- ─── Tab 4: ARTIFACTS (matches LUNAR Artifacts Autofarm tab) ───────
--- 8 Warden Shrines (MapDump-verified: workspace.Interactions["Warden Shrines"]).
--- "Shadow" was a phantom (not in the live game) — removed 2026-05-29.
-local SHRINES_LOW  = { 'Hellion', 'Angelic', 'Garra', 'Verdant' }
-local SHRINES_HIGH = { 'Boreal', 'Eigion', 'Novus', 'Ardor' }
+-- Per-realm shrine sets (HardcoreEnvScan 2026-05-29):
+--   Normal CoS realm: 8 shrines, no Shadow.
+--   Hardcore realm:   ONLY Shadow exists (other 8 shrine folders absent in
+--                     Workspace.Interactions["Warden Shrines"]; it's a different map).
+local SHRINES_LOW, SHRINES_HIGH
+if IS_HARDCORE then
+    SHRINES_LOW  = {}
+    SHRINES_HIGH = { 'Shadow' }
+else
+    SHRINES_LOW  = { 'Hellion', 'Angelic', 'Garra', 'Verdant' }
+    SHRINES_HIGH = { 'Boreal',  'Eigion',  'Novus', 'Ardor'   }
+end
 
 -- Per-shrine state flags
 S.ArtifactToggles = {}
@@ -3235,6 +3251,8 @@ local TABLET_POS = {
     Novus   = Vector3.new(1133.1, 857.9, 819.0),
     Garra   = Vector3.new(2333.9, 258.1, 1338.4),
     Eigion  = Vector3.new(1012.7, -508.9, 514.6),
+    -- Hardcore-only (HardcoreEnvScan 2026-05-29, PlaceId 136015760267602):
+    Shadow  = Vector3.new(-1098.3, 327.1, -476.4),
     -- Angelic + Ardor: auto-learned + saved when you first enter their regions.
 }
 local TABLET_FILE = 'hshub_cos_shrines.txt'
@@ -3324,6 +3342,15 @@ end
 -- ════════════════════════════════════════════════════════════════════
 local _cooldownNotified = {}   -- notify "cooldown" once per available->cooldown edge
 local _meatBlacklist    = {}   -- meat models that failed BOTH full + piece pickup
+local _shrineCooldownUntil = {} -- per-shrine: tick() until which we go FULLY SILENT (done)
+-- parse the tablet's TimerGui countdown ("29m 58s") into seconds
+local function parseCooldownSecs(txt)
+    if not txt then return nil end
+    local m = tonumber(txt:match('(%d+)%s*[mM]')) or 0
+    local s = tonumber(txt:match('(%d+)%s*[sS]')) or 0
+    local total = m * 60 + s
+    return total > 0 and total or nil
+end
 
 -- Live shrine-status labels in the Artifacts tab — mirror each tablet's TimerGui
 -- text ("AVAILABLE NOW" / "29m 58s"). "— (luar region)" if the tablet isn't loaded.
@@ -3809,5 +3836,8 @@ task.spawn(function()
     end
 end)
 
-HSHub:Notify('HS Hub loaded · Creatures of Sonaria · HS-COS-V4', 'ok', 3)
+HSHub:Notify(('HS Hub loaded · %s · HS-COS-V4')
+    :format(IS_HARDCORE and 'Sonaria HARDCORE (Shadow shrine enabled)'
+        or IS_ISLE10 and 'Isle 10'
+        or 'Creatures of Sonaria'), 'ok', 3)
 
