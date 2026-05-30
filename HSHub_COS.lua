@@ -3471,10 +3471,11 @@ task.spawn(function()
             end
             _cooldownNotified[shrineName] = nil    -- available again -> resume
 
-            -- V15 (faster): grab + offer in ONE pass. Scan the WHOLE Food folder and
-            -- pick the HIGHEST-Value carcass (no distance limit). tier-locked (carcass T
-            -- > our Tier) => piece-only; tier-locked & Value<=15 => skip; else full-first
-            -- then piece; blacklist if neither works.
+            -- V18 (ANTI-BAN, modeled on LUNAR's working pattern): after each TP, WAIT
+            -- ~0.8s so the position SETTLES before firing a remote, then snap BACK to
+            -- "home". Rapid TP-spam + staying far away was the ban signature (LUNAR's
+            -- own AutoGachaTokens does save->TP->wait(1)->act->TP-back). Slower = safer.
+            local home = root.CFrame   -- current spot (near shrine region); we return here
             local held = tonumber(char:GetAttribute('HeldCount')) or 0
             if held < 1 then
                 local foodFolder = (interactions() or {}):FindFirstChild('Food')
@@ -3504,16 +3505,16 @@ task.spawn(function()
                 end
                 if bestM and bestPart then
                     pcall(function() root.CFrame = bestPart.CFrame + Vector3.new(0, 4, 0) end)
-                    task.wait(0.15)
+                    task.wait(0.8)                 -- settle before firing (anti-detect)
                     if not bestLocked then
                         local full = getRemote('FoodPickup')
                         if full then pcall(function() full:InvokeServer(bestM) end) end
-                        task.wait(0.25)
+                        task.wait(0.6)
                     end
                     if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
                         local piece = getRemote('FoodChunk')
                         if piece then pcall(function() piece:InvokeServer(bestM) end) end
-                        task.wait(0.25)
+                        task.wait(0.6)
                     end
                     if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
                         _meatBlacklist[bestM] = true   -- can't take this one; try next-highest
@@ -3521,13 +3522,14 @@ task.spawn(function()
                 end
                 held = tonumber(char:GetAttribute('HeldCount')) or 0
             end
-            -- carrying now -> TP to the shrine tablet + offer (same pass = no wasted cycle)
+            -- carrying now -> TP to shrine, WAIT to settle, offer, then snap BACK home.
             if held >= 1 then
                 pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
-                task.wait(0.2)
+                task.wait(0.9)                     -- settle at the shrine before offering
                 local wo = getRemote('WardenOffering')
                 if wo then pcall(function() wo:InvokeServer(offerNameOf(shrineName)) end) end
-                task.wait(0.2)
+                task.wait(0.4)
+                pcall(function() root.CFrame = home end)   -- LUNAR-style snap back
             end
         end) end
 
