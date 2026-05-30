@@ -2851,7 +2851,7 @@ end
 local SHRINES_LOW, SHRINES_HIGH
 if IS_HARDCORE then
     SHRINES_LOW  = {}
-    SHRINES_HIGH = { 'Shadow' }
+    SHRINES_HIGH = { 'Shadow Up', 'Shadow Middle', 'Shadow Down' }  -- 3 altars, user picks
 else
     SHRINES_LOW  = { 'Hellion', 'Angelic', 'Garra', 'Verdant' }
     SHRINES_HIGH = { 'Boreal',  'Eigion',  'Novus', 'Ardor'   }
@@ -2899,25 +2899,24 @@ end
 do
     local Tab = Window:CreateTab('Teleports', '⛰')
     local Reg = Tab:CreateSection('REGION TELEPORTS')
-    -- REAL positions from RegionScan (RegionUtils.getRegionModel), 2026-05-29.
-    -- Y is the region model's pivot — Roblox streams terrain on demand, fly down
-    -- a bit after TP if you spawn high. Old hardcoded values were fictional and
-    -- caused underground TPs.
+    -- USER-SAVED positions (PosSaver, 2026-05-29). User walked to each region
+    -- and saved on-ground coords -> always lands sane, no sky/underground.
     local regions = {
-        {'Desert',            Vector3.new(-1807.1, 1228.0,  1194.3)},
-        {'Mesa',              Vector3.new(-2061.1, 1228.0,   180.2)},
-        {'Mountains',         Vector3.new(-1549.6,  170.0,  -801.8)},
-        {'Volcano Island',    Vector3.new( 2180.0,  -91.5,  1430.0)},
-        {'Central Rockfaces', Vector3.new(  145.4, -545.0,   -86.8)},
-        {'Coral Reef',        Vector3.new( 1250.4, -545.0,  1103.2)},
-        {'Grassy Shoal',      Vector3.new( -701.0, -545.0,  2108.2)},
-        {'Seaweed Depths',    Vector3.new( -109.6, -545.0,   993.2)},
-        {'Algae Sandbar',     Vector3.new( 1065.4, -545.0, -1436.8)},
-        {'Rocky Drop',        Vector3.new( 1065.4, -545.0,   578.2)},
-        {'Jungle',            Vector3.new( 2235.4, -545.0, -1186.8)},
-        {'Redwoods',          Vector3.new(  -71.1, -545.0, -1445.8)},
-        {'Tundra',            Vector3.new(-1005.6, -545.0, -2011.8)},
-        {'Swamp Hill',        Vector3.new(  833.6, -537.1, -2514.1)},
+        {'Desert',            Vector3.new(-1478.62, 291.62,  1425.98)},
+        {'Mesa',              Vector3.new(-2418.70, 219.02,   145.48)},
+        {'Mountains',         Vector3.new(-1800.22, 502.92, -1085.25)},
+        {'Volcano',           Vector3.new( 2116.81, 199.27,  1025.66)},
+        {'Pride Rocks',       Vector3.new( 2030.14, 186.93,  -401.38)},
+        {'Flower Cave',       Vector3.new( -240.97, 194.92,  2368.08)},
+        {'Central Rockfaces', Vector3.new( -149.20, 256.83,  -130.54)},
+        {'Coral Reef',        Vector3.new( 1102.50,  67.54,  1187.40)},
+        {'Grassy Shoal',      Vector3.new( -791.98, 102.55,  2088.24)},
+        {'Seaweed Depths',    Vector3.new(  -55.00, -33.11,   891.30)},
+        {'Algae Sandbar',     Vector3.new( 1133.80,  93.06, -1550.60)},
+        {'Jungle',            Vector3.new( 2484.53, 248.97,  -962.95)},
+        {'Redwoods',          Vector3.new(  424.62, 207.30, -1337.42)},
+        {'Tundra',            Vector3.new(-1029.08, 266.03, -2394.52)},
+        {'Swamp Hill',        Vector3.new(  607.47, 188.14, -2789.51)},
     }
     for _, r in ipairs(regions) do
         local name, pos = r[1], r[2]
@@ -3258,6 +3257,9 @@ end
 -- Known shrine TABLET world positions (static map features). Seeded with the two
 -- ArtifactScan captured; the other 6 are LEARNED live the first time you enter each
 -- region (cached + persisted to a file) so cross-region TP works afterwards.
+-- A shrine position is either a single Vector3, OR a LIST of Vector3 (multi-altar:
+-- the same logical shrine exists at several spots, e.g. hardcore "Shadow" = 3
+-- altars in 3 regions sharing ONE cooldown — offering at any one cools all down).
 local TABLET_POS = {
     -- 6/8 captured via V16 auto-cache (hshub_cos_shrines.txt, 2026-05-29).
     Hellion = Vector3.new(-1286.4, 232.7, 380.9),
@@ -3266,29 +3268,51 @@ local TABLET_POS = {
     Novus   = Vector3.new(1133.1, 857.9, 819.0),
     Garra   = Vector3.new(2333.9, 258.1, 1338.4),
     Eigion  = Vector3.new(1012.7, -508.9, 514.6),
-    -- Hardcore-only (HardcoreEnvScan 2026-05-29, PlaceId 136015760267602):
-    Shadow  = Vector3.new(-1098.3, 327.1, -476.4),
+    -- Hardcore "Shadow" = 3 separate altars (ShrineHunter, PlaceId 136015760267602).
+    -- User picks which via 3 toggles. All offer "Shadow" + share one cooldown.
+    ['Shadow Up']     = Vector3.new( 1312.47, -64.96,  540.15),
+    ['Shadow Middle'] = Vector3.new(  215.67, 404.63, -106.63),
+    ['Shadow Down']   = Vector3.new(-1098.30, 327.13, -476.35),
     -- Angelic + Ardor: auto-learned + saved when you first enter their regions.
 }
+-- normalize to a list of candidate positions to try (in order)
+local function tabletPositions(name)
+    local v = TABLET_POS[name]
+    if not v then return {} end
+    if typeof(v) == 'Vector3' then return { v } end
+    return v
+end
+-- Display/toggle name -> the actual WardenOffering arg + shrine folder name.
+-- The 3 hardcore Shadow toggles all resolve to the single in-game shrine "Shadow".
+local OFFER_NAME = {
+    ['Shadow Up'] = 'Shadow', ['Shadow Middle'] = 'Shadow', ['Shadow Down'] = 'Shadow',
+}
+local function offerNameOf(name) return OFFER_NAME[name] or name end
 local TABLET_FILE = 'hshub_cos_shrines.txt'
 pcall(function()
     if readfile and isfile and isfile(TABLET_FILE) then
         for line in tostring(readfile(TABLET_FILE)):gmatch('[^\n]+') do
             local n, x, y, z = line:match('([^=]+)=([%-%d%.]+),([%-%d%.]+),([%-%d%.]+)')
-            if n then TABLET_POS[n] = Vector3.new(tonumber(x), tonumber(y), tonumber(z)) end
+            -- never let the single-pos file clobber a hardcoded multi-altar list
+            if n and typeof(TABLET_POS[n]) ~= 'table' then
+                TABLET_POS[n] = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+            end
         end
     end
 end)
 local function rememberTabletPos(name, p)
     if not p then return end
+    if typeof(TABLET_POS[name]) == 'table' then return end   -- multi-altar: keep hardcoded list
     local old = TABLET_POS[name]
-    if old and (old - p).Magnitude < 5 then return end   -- already known
+    if old and (old - p).Magnitude < 5 then return end       -- already known
     TABLET_POS[name] = p
     pcall(function()
         if not writefile then return end
         local lines = {}
         for n, v in pairs(TABLET_POS) do
-            lines[#lines + 1] = ('%s=%.1f,%.1f,%.1f'):format(n, v.X, v.Y, v.Z)
+            if typeof(v) == 'Vector3' then   -- only persist single positions
+                lines[#lines + 1] = ('%s=%.1f,%.1f,%.1f'):format(n, v.X, v.Y, v.Z)
+            end
         end
         writefile(TABLET_FILE, table.concat(lines, '\n'))
     end)
@@ -3299,15 +3323,19 @@ end
 -- exist while in the shrine's region (streaming); when found we cache the position
 -- so we can TP back to that region later (cross-region farm in the loop below).
 local function getShrineTablet(name)
+    name = offerNameOf(name)   -- "Shadow Up/Middle/Down" -> folder "Shadow"
     local i = interactions(); if not i then return nil end
     local shrines = i:FindFirstChild('Warden Shrines'); if not shrines then return nil end
-    local folder = shrines:FindFirstChild(name)
-    if not folder then return nil end
     local fallback
-    for _, d in ipairs(folder:GetDescendants()) do
-        if d:IsA('BasePart') then
-            if d.Name:find('Tablet') then rememberTabletPos(name, d.Position); return d end
-            fallback = fallback or d
+    -- iterate ALL folders with this name (hardcore can have multiple "Shadow")
+    for _, folder in ipairs(shrines:GetChildren()) do
+        if folder.Name == name then
+            for _, d in ipairs(folder:GetDescendants()) do
+                if d:IsA('BasePart') then
+                    if d.Name:find('Tablet') then rememberTabletPos(name, d.Position); return d end
+                    fallback = fallback or d
+                end
+            end
         end
     end
     if fallback then rememberTabletPos(name, fallback.Position) end
@@ -3419,14 +3447,14 @@ task.spawn(function()
             if not root or not char then return end
             local tablet = getShrineTablet(shrineName)
             if not tablet then
-                -- Region not loaded. If we know this shrine's position (seeded or
-                -- learned earlier), TP there to stream it in (cross-region). Shrines
-                -- never visited yet have no position -> fly through that region once.
-                local known = TABLET_POS[shrineName]
-                if known then
+                -- Region not loaded. TP to each known position for this shrine to
+                -- stream it in (multi-altar shrines like hardcore "Shadow" have a few;
+                -- single shrines have one). Never-visited shrines have none -> fly there.
+                for _, known in ipairs(tabletPositions(shrineName)) do
                     pcall(function() root.CFrame = CFrame.new(known + Vector3.new(0, 8, 0)) end)
                     task.wait(1.5)
                     tablet = getShrineTablet(shrineName)
+                    if tablet then break end
                 end
                 if not tablet then return end      -- still streaming / unknown -> retry next cycle
             end
@@ -3498,7 +3526,7 @@ task.spawn(function()
                 pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
                 task.wait(0.2)
                 local wo = getRemote('WardenOffering')
-                if wo then pcall(function() wo:InvokeServer(shrineName) end) end
+                if wo then pcall(function() wo:InvokeServer(offerNameOf(shrineName)) end) end
                 task.wait(0.2)
             end
         end) end
