@@ -7,7 +7,7 @@
 
     Game     : Creatures of Sonaria  (Roblox creature survival)
     Build    : HS-COS-V4
-    Bundled  : 2026-05-29
+    Bundled  : 2026-05-30
     Library  : HSHub_UI v1.0.0
 
     This is a BUNDLED file. Do not edit directly — instead edit
@@ -2864,9 +2864,13 @@ for _, n in ipairs(SHRINES_HIGH) do S.ArtifactToggles[n] = false end
 S.AutoServerHopArtifact = false
 -- live status-label handles (updated by the status loop from the tablet's TimerGui)
 local shrineStatusLabels = {}
+local meatCounterLabel   = nil   -- updated by the status loop with server-wide carcass stats
 
 do
     local Tab = Window:CreateTab('Artifacts', '✦')
+
+    local InfoSec = Tab:CreateSection('SERVER MEAT')
+    meatCounterLabel = InfoSec:AddLabel('Meat di server: —', Color3.fromRGB(180, 220, 255))
 
     local function makeShrineToggle(section, name)
         local key = ('AF_%s'):format(name)
@@ -2895,14 +2899,25 @@ end
 do
     local Tab = Window:CreateTab('Teleports', '⛰')
     local Reg = Tab:CreateSection('REGION TELEPORTS')
+    -- REAL positions from RegionScan (RegionUtils.getRegionModel), 2026-05-29.
+    -- Y is the region model's pivot — Roblox streams terrain on demand, fly down
+    -- a bit after TP if you spawn high. Old hardcoded values were fictional and
+    -- caused underground TPs.
     local regions = {
-        {'Jungle',Vector3.new(1500,100,1500)},{'Algae Sandbar',Vector3.new(-2000,100,1000)},
-        {'Central Rockfaces',Vector3.new(0,200,0)},{'Swamp Hill',Vector3.new(2500,150,-1000)},
-        {'Coral Reef',Vector3.new(-1500,50,2500)},{'Desert',Vector3.new(-3000,100,-1500)},
-        {'Grassy Shoal',Vector3.new(1000,100,-2000)},{'Rocky Drop',Vector3.new(-2500,300,500)},
-        {'Redwoods',Vector3.new(2000,200,2500)},{'Mountains',Vector3.new(0,500,-3000)},
-        {'Tundra',Vector3.new(-3000,150,3000)},{'Seaweed Depths',Vector3.new(500,-100,2500)},
-        {'Flower Cave',Vector3.new(-500,-50,-500)},{'Mesa',Vector3.new(3500,250,0)},
+        {'Desert',            Vector3.new(-1807.1, 1228.0,  1194.3)},
+        {'Mesa',              Vector3.new(-2061.1, 1228.0,   180.2)},
+        {'Mountains',         Vector3.new(-1549.6,  170.0,  -801.8)},
+        {'Volcano Island',    Vector3.new( 2180.0,  -91.5,  1430.0)},
+        {'Central Rockfaces', Vector3.new(  145.4, -545.0,   -86.8)},
+        {'Coral Reef',        Vector3.new( 1250.4, -545.0,  1103.2)},
+        {'Grassy Shoal',      Vector3.new( -701.0, -545.0,  2108.2)},
+        {'Seaweed Depths',    Vector3.new( -109.6, -545.0,   993.2)},
+        {'Algae Sandbar',     Vector3.new( 1065.4, -545.0, -1436.8)},
+        {'Rocky Drop',        Vector3.new( 1065.4, -545.0,   578.2)},
+        {'Jungle',            Vector3.new( 2235.4, -545.0, -1186.8)},
+        {'Redwoods',          Vector3.new(  -71.1, -545.0, -1445.8)},
+        {'Tundra',            Vector3.new(-1005.6, -545.0, -2011.8)},
+        {'Swamp Hill',        Vector3.new(  833.6, -537.1, -2514.1)},
     }
     for _, r in ipairs(regions) do
         local name, pos = r[1], r[2]
@@ -3357,12 +3372,28 @@ end
 task.spawn(function()
     while true do
         task.wait(2)
+        -- per-shrine status labels (TimerGui mirror)
         for name, lbl in pairs(shrineStatusLabels) do
             pcall(function()
                 local txt = getShrineStatusText(name)
                 lbl:Set(txt and ('Status: ' .. txt) or 'Status: — (luar region)')
             end)
         end
+        -- server-wide carcass stats (offer-meat only; matches autofarm filter)
+        if meatCounterLabel then pcall(function()
+            local f = (interactions() or {}):FindFirstChild('Food')
+            if not f then meatCounterLabel:Set('Meat di server: Food folder ga ke-load'); return end
+            local count, total, best, bestName = 0, 0, 0, nil
+            for _, m in ipairs(f:GetChildren()) do
+                if isOfferMeat(m:GetAttribute('FoodDataName')) then
+                    local v = tonumber(m:GetAttribute('Value')) or 0
+                    count = count + 1; total = total + v
+                    if v > best then best, bestName = v, m:GetAttribute('FoodDataName') end
+                end
+            end
+            meatCounterLabel:Set(('Meat di server: %d carcass · total %d · tertinggi %d (%s)')
+                :format(count, total, best, tostring(bestName or '—')))
+        end) end
     end
 end)
 
