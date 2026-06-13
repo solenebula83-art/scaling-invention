@@ -2804,6 +2804,10 @@ do
                 if type(sec) == 'table' and sec.AddToggle then
                     local _origTog = sec.AddToggle
                     function sec:AddToggle(o)
+                        if o and type(o.Callback) == 'function' then
+                            local _cb = o.Callback   -- wrap so EVERY toggle change persists IMMEDIATELY (not just every 8s)
+                            o.Callback = function(v) _cb(v); if not S._cfgLoading then pcall(function() if S._cfgSave then S._cfgSave() end end) end end
+                        end
                         local h = _origTog(self, o)
                         local key = o and (o.Key or o.Name)
                         if key and type(h) == 'table' and h.Set then S._cfgHandles[key] = h end
@@ -3551,6 +3555,30 @@ local function bestMeatSpot()
     end
     return best
 end
+-- live offer-meat (>= MeatMinValue) in the currently-streamed Food folder (= current region)
+local function liveMeatHere()
+    local ff = (interactions() or {}):FindFirstChild('Food')
+    if not ff then return false end
+    for _, m in ipairs(ff:GetChildren()) do
+        if isOfferMeat(m:GetAttribute('FoodDataName'))
+            and (tonumber(m:GetAttribute('Value')) or 0) >= (S.MeatMinValue or 100) then return true end
+    end
+    return false
+end
+-- THE single server-hop gate (user rule): hop ONLY when meat is truly gone everywhere we can
+-- reach. = no live meat in this region AND (meat-memory OFF, or no remembered >=100 region left
+-- to rescan) AND at least one enabled shrine is AVAILABLE (not cooldown) to deposit at.
+--   no shrine enabled  -> false (idle; fixes "hop right after spawn")
+--   all shrines cooldown-> false (idle + wait for reset; user wants this)
+--   remembered >=100 region exists (memory ON) -> false (go rescan it, don't hop)
+local function shouldHopNoMeat()
+    if liveMeatHere() then return false end
+    if S.MeatRegionMemory and bestMeatSpot() then return false end
+    for _, n in ipairs(shrineActivationOrder) do
+        if shrineAvailable(n) == true then return true end   -- an enabled shrine is ready + no meat -> hop
+    end
+    return false
+end
 -- parse the tablet's TimerGui countdown ("29m 58s") into seconds
 local function parseCooldownSecs(txt)
     if not txt then return nil end
@@ -3750,11 +3778,13 @@ task.spawn(function()
     end
 end)
 
--- Auto Server Hop (Artifacts tab Recommend) — same as Others tab Server Hop
+-- Auto Server Hop (Artifacts tab Recommend) — the SINGLE owner of no-meat hopping.
+-- shouldHopNoMeat() is the whole rule: no live meat here + no remembered >=100 region left +
+-- a shrine is available. (Meat-memory rescan/fetch is the farm loop's job, not this loop's.)
 task.spawn(function()
     while true do
         task.wait(30)
-        if S.AutoServerHopArtifact then
+        if S.AutoServerHopArtifact and shouldHopNoMeat() then
             pcall(function()
                 local ok, raw = pcall(function()
                     return game:HttpGet('https://games.roblox.com/v1/games/'..tostring(game.PlaceId)
@@ -4335,26 +4365,8 @@ do
         statusSet('x restart+play failed (check confirm button name)'); return false
     end
 
-    -- ═══ conditional server hop (only when shrines done) ═══
-    local function serverHop()
-        statusSet('server hop (shrines done)')
-        pcall(function()
-            local ok, raw = pcall(function()
-                return game:HttpGet('https://games.roblox.com/v1/games/' .. tostring(game.PlaceId)
-                    .. '/servers/Public?sortOrder=Asc&limit=100')
-            end)
-            if ok and raw then
-                local d = HttpService:JSONDecode(raw)
-                if d and d.data then
-                    for _, srv in ipairs(d.data) do
-                        if srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
-                            TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LP); return
-                        end
-                    end
-                end
-            end
-        end)
-    end
+    -- (server-hop on no-meat is owned solely by the standalone "Auto Server Hop" loop above,
+    --  gated by shouldHopNoMeat(). The orchestrator only farms / idles / realm-hops.)
 
     -- reachable = tablet loaded NOW, OR a TP position is known (hardcoded / learned file).
     -- Ardor & Angelic are NOT hardcoded (auto-learned) -> if unknown, skip so we don't
@@ -4380,11 +4392,12 @@ do
     end
 
     -- ═══ ORCHESTRATOR ═══
-    local completed = {}            -- shrines deposited (cooldown) this life
+    local completed = {}            -- shrine name -> tick() when its cooldown ENDS (re-farm after that)
+    local function onCD(n) local e = completed[n]; return e and tick() < e end   -- live cooldown check (auto-expires)
     local noMeat = {}               -- shrine -> tick() when its region had NO usable meat
     local lastActive, activeSince = nil, 0
     local NO_MEAT_SECS, NOMEAT_SKIP = 9, 120    -- give up a region after 9s of no pickup; re-check it after 120s
-    local lastInvis, lastHop, lastRealmHop = 0, 0, 0
+    local lastInvis, lastRealmHop = 0, 0
     local REALM_NORMAL, REALM_HARDCORE = 5233782396, 136015760267602
     local busy, managing = false, false
     local autoArmed = false   -- true after the 5s start-countdown for the current ON session
@@ -4416,7 +4429,7 @@ do
                         -- LOBBY -> spawn
                         task.wait(0.6 + math.random())
                         spawnFor(mode)
-                        completed = {}; noMeat = {}; lastActive = nil   -- fresh life resets progress
+                        noMeat = {}; lastActive = nil   -- fresh life: re-scan regions (shrine cooldowns are server-side -> KEEP completed)
                     else
                         -- IN GAME -> hide-scent (+ stealth invis) + priority farm + hop
                         S.AutoScentHidden = true
@@ -4433,27 +4446,31 @@ do
                         -- reachable. This is strict priority by the user's toggle order: a lower-
                         -- priority shrine is only reached once every higher one is on cooldown (done).
                         for _, n in ipairs(order) do
-                            local skipNoMeat = noMeat[n] and (tick() - noMeat[n] < NOMEAT_SKIP)
-                            if not completed[n] and not skipNoMeat then
+                            -- meat-memory ON: never skip an empty region (the farm loop fetches meat from a
+                            -- remembered region instead). OFF: skip an empty region for NOMEAT_SKIP secs.
+                            local skipNoMeat = (not S.MeatRegionMemory) and noMeat[n] and (tick() - noMeat[n] < NOMEAT_SKIP)
+                            if not onCD(n) and not skipNoMeat then       -- skip shrines STILL on cooldown
                                 local av = shrineAvailable(n)
                                 if av == false then
-                                    completed[n] = true                 -- on cooldown = done this server
+                                    -- on cooldown -> remember WHEN it ends (from the live tablet timer) so it
+                                    -- auto-resumes once the cooldown resets (user: "if cd reset again then lanjut")
+                                    completed[n] = tick() + (parseCooldownSecs(getShrineStatusText(n)) or 1800)
                                 elseif shrineReachable(n) then
-                                    active = n; break                   -- loaded / position known -> farm it
+                                    active = n; break                   -- available + reachable -> farm it
                                 else
                                     skipped = skipped or n              -- unreachable (e.g. Ardor unknown) -> next
                                 end
                             end
                         end
-                        local doneN = 0; for _ in pairs(completed) do doneN = doneN + 1 end
+                        local doneN = 0; for _, n in ipairs(order) do if onCD(n) then doneN = doneN + 1 end end
                         -- REALM-HOP: normal realm (3 priority shrines cooldown) -> hardcore for Shadow;
                         -- hardcore (Shadow done) -> back to normal. TeleportService = direct realm switch,
                         -- no button click needed.
                         if S.RealmHopArtifact and (tick() - lastRealmHop > 60) then
-                            if (not IS_HARDCORE) and completed['Ardor'] and completed['Novus'] and completed['Eigion'] then
+                            if (not IS_HARDCORE) and onCD('Ardor') and onCD('Novus') and onCD('Eigion') then
                                 lastRealmHop = tick(); statusSet('3 priority done -> click HARDCORE realm')
                                 realmSwitch(S.RealmHardcoreX, S.RealmHardcoreY); return
-                            elseif IS_HARDCORE and (completed['Shadow Up'] or completed['Shadow Middle'] or completed['Shadow Down']) then
+                            elseif IS_HARDCORE and (onCD('Shadow Up') or onCD('Shadow Middle') or onCD('Shadow Down')) then
                                 lastRealmHop = tick(); statusSet('shadow done -> click NORMAL realm')
                                 realmSwitch(S.RealmNormalX, S.RealmNormalY); return
                             end
@@ -4473,15 +4490,22 @@ do
                                 statusSet(('farming %s (%d/%d done)'):format(active, doneN, target))
                             end
                         else
+                            -- active==nil: nothing to farm THIS cycle. Only set status here — the
+                            -- standalone Auto Server Hop loop is the SINGLE hop owner (shouldHopNoMeat).
                             lastActive = nil
-                            local anyNoMeat = false
-                            for _, t in pairs(noMeat) do if tick() - t < NOMEAT_SKIP then anyNoMeat = true end end
-                            if skipped and not anyNoMeat then
+                            local nCool = 0
+                            for _, n in ipairs(order) do if onCD(n) then nCool = nCool + 1 end end
+                            if target == 0 then
+                                statusSet('no shrine enabled -> idle (pilih shrine di tab Artifacts)')
+                            elseif skipped then
                                 statusSet(skipped .. ' pos unknown - run ShrineHunter')
+                            elseif nCool >= target then
+                                -- every enabled shrine on cooldown -> idle + wait for reset (never hop)
+                                statusSet(('%d/%d shrine cooldown -> idle (nunggu reset)'):format(nCool, target))
+                            elseif shouldHopNoMeat() then
+                                statusSet('no meat (region + memory habis) -> Auto Server Hop')
                             else
-                                statusSet(anyNoMeat and ('no meat in any region (%d/%d) -> hop'):format(doneN, target)
-                                    or ('farm done %d/%d -> idle'):format(doneN, target))
-                                if S.AutoFarmHopWhenDone and (tick() - lastHop > 30) then lastHop = tick(); task.wait(1.5); serverHop() end
+                                statusSet('cari meat (region/memory)...')
                             end
                         end
                     end
@@ -4663,12 +4687,16 @@ end
 -- ═══════════════════════════════════════════════════════════════════
 do
     local CFG_FILE = 'HSHub_cos_config.json'
+    -- Save EVERY plain S field (number / string / BOOLEAN). Booleans are the toggle states
+    -- (AutoServerHopArtifact, MeatRegionMemory, AutoNormalMode, …) — they MUST persist directly
+    -- in S, NOT via UI handles, so config works even if the toggle-capture wrapper caught nothing.
+    -- Skips _private fields, functions and tables (S.ArtifactToggles is handled via `order`).
     local function cfgScalars()
         local out = {}
         for k, v in pairs(S) do
             if type(k) == 'string' and k:sub(1, 1) ~= '_' then
                 local tv = type(v)
-                if tv == 'number' or tv == 'string' then out[k] = v end
+                if tv == 'number' or tv == 'string' or tv == 'boolean' then out[k] = v end
             end
         end
         return out
@@ -4688,44 +4716,54 @@ do
         pcall(function() writefile(CFG_FILE, json) end)
     end
     local function cfgLoad()
-        if not readfile then return end
-        if isfile and not isfile(CFG_FILE) then return end
-        local ok, raw = pcall(readfile, CFG_FILE); if not ok or not raw or raw == '' then return end
+        if not readfile then return 0, 0 end
+        if isfile and not isfile(CFG_FILE) then return 0, 0 end
+        local ok, raw = pcall(readfile, CFG_FILE); if not ok or not raw or raw == '' then return 0, 0 end
         local ok2, t = pcall(function() return HttpService:JSONDecode(raw) end)
-        if not ok2 or type(t) ~= 'table' then return end
-        -- 1) scalars (logic-level: coords, meat-min, mission target, …)
+        if not ok2 or type(t) ~= 'table' then return 0, 0 end
+        -- 1) scalars (num / str / BOOL) -> S DIRECTLY. This is the real restore: every toggle
+        --    logic flag + every coord/slider lands back in S with NO dependency on UI handles.
+        local nS = 0
         if type(t.scalars) == 'table' then
             for k, v in pairs(t.scalars) do
-                if type(v) == 'number' or type(v) == 'string' then S[k] = v end
+                local tv = type(v)
+                if tv == 'number' or tv == 'string' or tv == 'boolean' then S[k] = v; nS = nS + 1 end
             end
         end
-        -- 2) toggles -> :Set restores the visual AND runs the Callback (sets the S flag +
-        --    re-adds shrines to shrineActivationOrder). Keys missing in this realm (e.g. a
-        --    normal-realm shrine while in hardcore) simply have no handle -> skipped.
-        local n = 0
+        -- 2) shrine selection + PRIORITY restored DIRECTLY from saved `order` (no handle dependency):
+        --    clear, then enable each saved shrine that exists in THIS realm, in saved order.
+        local nShrine = 0
+        if type(t.order) == 'table' then
+            for n in pairs(S.ArtifactToggles) do S.ArtifactToggles[n] = false end
+            for i = #shrineActivationOrder, 1, -1 do shrineActivationOrder[i] = nil end
+            local seen = {}
+            for _, name in ipairs(t.order) do
+                if S.ArtifactToggles[name] ~= nil and not seen[name] then
+                    S.ArtifactToggles[name] = true
+                    shrineActivationOrder[#shrineActivationOrder + 1] = name
+                    seen[name] = true; nShrine = nShrine + 1
+                end
+            end
+        end
+        -- 3) visual sync (cosmetic only): if toggle handles WERE captured, set them so the UI
+        --    shows the right ON/OFF. Logic already fully restored above, so this is optional.
         if type(t.toggles) == 'table' then
             for key, v in pairs(t.toggles) do
                 local h = (S._cfgHandles or {})[key]
-                if h and h.Set then pcall(function() h:Set(v and true or false) end); if v then n = n + 1 end end
+                if h and h.Set then pcall(function() h:Set(v and true or false) end) end
             end
         end
-        -- 3) restore shrine PRIORITY order (step 2 re-added them in arbitrary pairs() order).
-        --    keep only shrines actually enabled in THIS realm; append any not in the saved order.
-        if type(t.order) == 'table' then
-            local desired, seen = {}, {}
-            for _, name in ipairs(t.order) do
-                if S.ArtifactToggles[name] and not seen[name] then desired[#desired + 1] = name; seen[name] = true end
-            end
-            for _, name in ipairs(shrineActivationOrder) do
-                if S.ArtifactToggles[name] and not seen[name] then desired[#desired + 1] = name; seen[name] = true end
-            end
-            for i = #shrineActivationOrder, 1, -1 do shrineActivationOrder[i] = nil end
-            for _, name in ipairs(desired) do shrineActivationOrder[#shrineActivationOrder + 1] = name end
-        end
-        if n > 0 then pcall(function() HSHub:Notify(('Config restored · %d toggle aktif lagi'):format(n), 'ok', 3) end) end
+        return nS, nShrine
     end
     S._cfgSave = cfgSave             -- expose so realm-switch can force a save before reload
-    pcall(cfgLoad)                   -- auto-load on inject
+    S._cfgLoading = true             -- suppress save-on-change while restoring (avoid 1 write per toggle)
+    local nS, nShrine = 0, 0
+    pcall(function() nS, nShrine = cfgLoad() end)   -- auto-load on inject
+    S._cfgLoading = false
+    pcall(function()                 -- observable diagnostic: settings/shrines restored work even if handles=0
+        local hc = 0; for _ in pairs(S._cfgHandles or {}) do hc = hc + 1 end
+        HSHub:Notify(('Config: %d settings · %d shrines · %d UI handles'):format(nS, nShrine, hc), 'ok', 4)
+    end)
     task.spawn(function() while true do task.wait(8); pcall(cfgSave) end end)   -- auto-save
 end
 
