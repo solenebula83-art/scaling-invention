@@ -7,7 +7,7 @@
 
     Game     : Creatures of Sonaria  (Roblox creature survival)
     Build    : HS-COS-V4
-    Bundled  : 2026-06-13
+    Bundled  : 2026-06-14
     Library  : HSHub_UI v1.0.0
 
     This is a BUNDLED file. Do not edit directly — instead edit
@@ -2956,15 +2956,44 @@ S.MeatRegionMemory = false  -- if a shrine region has no meat, fetch from a reme
 -- live status-label handles (updated by the status loop from the tablet's TimerGui)
 local shrineStatusLabels = {}
 local meatCounterLabel   = nil   -- updated by the status loop with server-wide carcass stats
--- USER-DEFINED PRIORITY: which shrines were toggled ON, in the order toggled (first ON =
--- highest priority). Drives BOTH getActiveShrine (manual) and orderedShrines (autonomous).
+-- USER-DEFINED PRIORITY (MANUAL Artifacts tab only): which shrines were toggled ON, in the order
+-- toggled (first ON = highest priority). Drives getActiveShrine for the MANUAL artifact farm.
+-- (The AUTONOMOUS farm does NOT use this — it has a fixed shrine set, see orderedShrines.)
 local shrineActivationOrder = {}
+
+-- ═══ REGION NOTEBOOK (user spec 2026-06-14) ═══ the autonomous/meat farm rotates through these
+-- regions to FIND meat. Region = meat source; shrine = the goal. Coords are the user-saved on-ground
+-- positions (also used by the Teleports tab). The notebook (regionBlacklist/regionLog/huntIdx) is
+-- per-server runtime state: a region scanned with no meat >=100 is temp-blacklisted; when ALL are
+-- blacklisted -> server hop -> the whole notebook resets (new script run = these locals re-init).
+local REGION_COORDS = {
+    {'Desert',            Vector3.new(-1478.62, 291.62,  1425.98)},
+    {'Mesa',              Vector3.new(-2418.70, 219.02,   145.48)},
+    {'Mountains',         Vector3.new(-1800.22, 502.92, -1085.25)},
+    {'Volcano',           Vector3.new( 2116.81, 199.27,  1025.66)},
+    {'Pride Rocks',       Vector3.new( 2030.14, 186.93,  -401.38)},
+    {'Flower Cave',       Vector3.new( -240.97, 194.92,  2368.08)},
+    {'Central Rockfaces', Vector3.new( -149.20, 256.83,  -130.54)},
+    {'Coral Reef',        Vector3.new( 1102.50,  67.54,  1187.40)},
+    {'Grassy Shoal',      Vector3.new( -791.98, 102.55,  2088.24)},
+    {'Seaweed Depths',    Vector3.new(  -55.00, -33.11,   891.30)},
+    {'Algae Sandbar',     Vector3.new( 1133.80,  93.06, -1550.60)},
+    {'Jungle',            Vector3.new( 2484.53, 248.97,  -962.95)},
+    {'Redwoods',          Vector3.new(  424.62, 207.30, -1337.42)},
+    {'Tundra',            Vector3.new(-1029.08, 266.03, -2394.52)},
+    {'Swamp Hill',        Vector3.new(  607.47, 188.14, -2789.51)},
+}
+local regionBlacklist  = {}   -- region name -> true (no meat >=100 this server; reset on reload/hop)
+local regionLog        = {}   -- region name -> best meat Value seen there (for the panel display)
+local huntIdx          = 0    -- which REGION_COORDS index we're currently hunting in (0 = at a shrine)
+local regionPanelLabel        -- UI label (Artifacts tab) showing the notebook; assigned at tab build
 
 do
     local Tab = Window:CreateTab('Artifacts', '✦')
 
     local InfoSec = Tab:CreateSection('SERVER MEAT')
     meatCounterLabel = InfoSec:AddLabel('Meat di server: —', Color3.fromRGB(180, 220, 255))
+    regionPanelLabel = InfoSec:AddLabel('Notebook: —', Color3.fromRGB(170, 230, 180))
 
     local function makeShrineToggle(section, name)
         local key = ('AF_%s'):format(name)
@@ -3003,7 +3032,7 @@ do
         Tip="If the server's food runs out, hop to another",
         Callback=function(v) S.AutoServerHopArtifact = v end })
     Rec:AddToggle({ Name='Remember Meat Regions', Key='MRM', Default=false,
-        Tip='Shrine region kosong meat? jemput meat dari region kaya yang pernah discan (nambah TP)',
+        Tip='MANUAL farm: rotate regions to find meat >=100 (notebook). Autonomous farm always does this.',
         Callback=function(v) S.MeatRegionMemory = v end })
 end
 
@@ -3011,26 +3040,9 @@ end
 do
     local Tab = Window:CreateTab('Teleports', '⛰')
     local Reg = Tab:CreateSection('REGION TELEPORTS')
-    -- USER-SAVED positions (PosSaver, 2026-05-29). User walked to each region
-    -- and saved on-ground coords -> always lands sane, no sky/underground.
-    local regions = {
-        {'Desert',            Vector3.new(-1478.62, 291.62,  1425.98)},
-        {'Mesa',              Vector3.new(-2418.70, 219.02,   145.48)},
-        {'Mountains',         Vector3.new(-1800.22, 502.92, -1085.25)},
-        {'Volcano',           Vector3.new( 2116.81, 199.27,  1025.66)},
-        {'Pride Rocks',       Vector3.new( 2030.14, 186.93,  -401.38)},
-        {'Flower Cave',       Vector3.new( -240.97, 194.92,  2368.08)},
-        {'Central Rockfaces', Vector3.new( -149.20, 256.83,  -130.54)},
-        {'Coral Reef',        Vector3.new( 1102.50,  67.54,  1187.40)},
-        {'Grassy Shoal',      Vector3.new( -791.98, 102.55,  2088.24)},
-        {'Seaweed Depths',    Vector3.new(  -55.00, -33.11,   891.30)},
-        {'Algae Sandbar',     Vector3.new( 1133.80,  93.06, -1550.60)},
-        {'Jungle',            Vector3.new( 2484.53, 248.97,  -962.95)},
-        {'Redwoods',          Vector3.new(  424.62, 207.30, -1337.42)},
-        {'Tundra',            Vector3.new(-1029.08, 266.03, -2394.52)},
-        {'Swamp Hill',        Vector3.new(  607.47, 188.14, -2789.51)},
-    }
-    for _, r in ipairs(regions) do
+    -- USER-SAVED positions (PosSaver, 2026-05-29). Shared with the autonomous farm's region
+    -- notebook (REGION_COORDS, declared near the top) so both use the exact same coords.
+    for _, r in ipairs(REGION_COORDS) do
         local name, pos = r[1], r[2]
         Reg:AddButton({ Name=name, Callback=function()
             local root = getRoot()
@@ -3511,16 +3523,21 @@ end
 -- If every enabled shrine is on cooldown, returns the first one so the
 -- caller (farm loop) can show the idle/cooldown notification and wait.
 local function getActiveShrine()
-    local fallback = nil
-    for _, n in ipairs(shrineActivationOrder) do
-        if S.ArtifactToggles[n] then
-            -- shrineAvailable: true=ready, false=cooldown, nil=tablet not loaded (treat as ok)
-            if shrineAvailable(n) ~= false then
-                return n          -- available (or unknown) -> farm this one now
-            end
-            fallback = fallback or n  -- remember first cooldown shrine as last-resort
+    -- Priority = manual toggle order FIRST (shrineActivationOrder), then ANY other enabled shrine.
+    -- The autonomous orchestrator enables exactly ONE shrine (via S.ArtifactToggles) that is usually
+    -- NOT in shrineActivationOrder, so the second loop is what lets autonomous actually farm.
+    -- shrineAvailable: true=ready, false=cooldown, nil=tablet not loaded (treat nil as ok -> go to it).
+    local fallback, seen = nil, {}
+    local function pick(n)
+        if S.ArtifactToggles[n] and not seen[n] then
+            seen[n] = true
+            if shrineAvailable(n) ~= false then return true end
+            fallback = fallback or n   -- remember first cooldown shrine as last-resort
         end
+        return false
     end
+    for _, n in ipairs(shrineActivationOrder) do if pick(n) then return n end end
+    for n in pairs(S.ArtifactToggles)        do if pick(n) then return n end end
     return fallback   -- nil = nothing enabled; or all-cooldown fallback
 end
 
@@ -3531,31 +3548,8 @@ end
 local _cooldownNotified = {}   -- notify "cooldown" once per available->cooldown edge
 local _meatBlacklist    = {}   -- meat models that failed BOTH full + piece pickup
 local _shrineCooldownUntil = {} -- per-shrine: tick() until which we go FULLY SILENT (done)
--- ═══ MEAT-REGION MEMORY (user idea) ═══ remember regions where meat Value >= MEAT_REMEMBER was
--- seen; when the current shrine's region has NO usable meat, TP to the best remembered region to
--- grab, then carry it to the shrine. Decouples meat-source from shrine-location so a priority
--- shrine with an empty region is FARMED instead of skipped/hopped. Gated by S.MeatRegionMemory.
-local meatSpots     = {}    -- cellKey -> { pos=Vector3, val=number, t=tick(), failAt=number }
-local MEAT_REMEMBER = 100   -- remember a region when its best meat Value >= this
-local MEAT_TTL      = 600   -- forget a remembered spot after 10 min (meat likely gone/restreamed)
-local function meatCell(p) return ('%d,%d'):format(math.floor(p.X / 180), math.floor(p.Z / 180)) end
-local function rememberMeat(pos, val)
-    if not pos or (val or 0) < MEAT_REMEMBER then return end
-    local k = meatCell(pos)
-    local e = meatSpots[k]
-    if (not e) or val >= e.val then meatSpots[k] = { pos = pos, val = val, t = tick(), failAt = 0 } end
-end
-local function bestMeatSpot()
-    local best = nil
-    for k, e in pairs(meatSpots) do
-        if tick() - e.t > MEAT_TTL then meatSpots[k] = nil                 -- expired -> forget
-        elseif tick() - (e.failAt or 0) > 45 then                         -- skip recently-failed for 45s
-            if (not best) or e.val > best.val then best = e end
-        end
-    end
-    return best
-end
--- live offer-meat (>= MeatMinValue) in the currently-streamed Food folder (= current region)
+-- ═══ REGION NOTEBOOK HELPERS (user spec) ═══ rotate regions to find meat; remember which are empty.
+-- live offer-meat (>= MeatMinValue) in the currently-streamed Food folder (= the region we're in now)
 local function liveMeatHere()
     local ff = (interactions() or {}):FindFirstChild('Food')
     if not ff then return false end
@@ -3565,17 +3559,62 @@ local function liveMeatHere()
     end
     return false
 end
--- THE single server-hop gate (user rule): hop ONLY when meat is truly gone everywhere we can
--- reach. = no live meat in this region AND (meat-memory OFF, or no remembered >=100 region left
--- to rescan) AND at least one enabled shrine is AVAILABLE (not cooldown) to deposit at.
---   no shrine enabled  -> false (idle; fixes "hop right after spawn")
---   all shrines cooldown-> false (idle + wait for reset; user wants this)
---   remembered >=100 region exists (memory ON) -> false (go rescan it, don't hop)
+-- region rotation is active when the user enabled it (manual "Remember Meat") OR whenever the
+-- autonomous farm is running (autonomous NEEDS to roam regions to find meat).
+local function notebookOn() return S.MeatRegionMemory or S.AutoNormalMode or S.AutoStealthMode end
+-- every region scanned this server and found empty? (= meat truly gone -> time to hop + reset)
+local function allRegionsBlacklisted()
+    for _, rg in ipairs(REGION_COORDS) do
+        if not regionBlacklist[rg[1]] then return false end
+    end
+    return true
+end
+-- refresh the Artifacts-tab notebook label: which regions have meat (+value) and how many are empty
+local function updateRegionPanel()
+    if not regionPanelLabel then return end
+    local have, emptyN = {}, 0
+    for _, rg in ipairs(REGION_COORDS) do
+        local nm = rg[1]
+        if regionBlacklist[nm] then emptyN = emptyN + 1
+        elseif (regionLog[nm] or 0) > 0 then have[#have + 1] = nm .. ':' .. tostring(regionLog[nm]) end
+    end
+    local s = 'Notebook: meat[' .. (#have > 0 and table.concat(have, ', ') or '-') .. ']'
+        .. (' · empty %d/%d'):format(emptyN, #REGION_COORDS)
+    pcall(function() regionPanelLabel:Set(s) end)
+end
+-- blacklist the current hunt region (empty) + TP to the next un-blacklisted region to scan next cycle.
+-- returns false when ALL regions are blacklisted (caller idles/hops; notebook resets on the next hop).
+local function huntNextRegion(root)
+    if huntIdx > 0 and REGION_COORDS[huntIdx] then
+        local nm = REGION_COORDS[huntIdx][1]
+        regionBlacklist[nm] = true; regionLog[nm] = 0
+    end
+    local nextIdx
+    for step = 1, #REGION_COORDS do
+        local i = ((huntIdx + step - 1) % #REGION_COORDS) + 1
+        if not regionBlacklist[REGION_COORDS[i][1]] then nextIdx = i; break end
+    end
+    updateRegionPanel()
+    if not nextIdx then return false end
+    huntIdx = nextIdx
+    local rg = REGION_COORDS[nextIdx]
+    pcall(function() (root or getRoot()).CFrame = CFrame.new(rg[2] + Vector3.new(0, 8, 0)) end)
+    task.wait(1.6)                              -- stream the region in; the actual scan is next cycle
+    return true
+end
+-- THE single server-hop gate (user rule): hop ONLY when meat is truly gone everywhere.
+--   live meat right here              -> false (farm it)
+--   notebook ON + not every region empty yet -> false (keep scanning/rotating, don't hop)
+--   notebook OFF + a shrine is ready  -> true (legacy: no meat here + something to farm)
+-- Right after spawn nothing is blacklisted -> allRegionsBlacklisted=false -> never hops on spawn.
 local function shouldHopNoMeat()
     if liveMeatHere() then return false end
-    if S.MeatRegionMemory and bestMeatSpot() then return false end
+    if notebookOn() then return allRegionsBlacklisted() end
     for _, n in ipairs(shrineActivationOrder) do
-        if shrineAvailable(n) == true then return true end   -- an enabled shrine is ready + no meat -> hop
+        if shrineAvailable(n) == true then return true end
+    end
+    for n, on in pairs(S.ArtifactToggles) do
+        if on and shrineAvailable(n) == true then return true end
     end
     return false
 end
@@ -3617,7 +3656,6 @@ task.spawn(function()
             end
             meatCounterLabel:Set(('Meat di server: %d carcass · total %d · tertinggi %d (%s)')
                 :format(count, total, best, tostring(bestName or '—')))
-            if best >= MEAT_REMEMBER and bestPart then rememberMeat(bestPart.Position, best) end  -- passive cache build
         end) end
     end
 end)
@@ -3630,51 +3668,31 @@ task.spawn(function()
         local shrineName = getActiveShrine()
 
         if shrineName then pcall(function()
-            -- ARTIFACT FARM V14 (rebuilt fully from ArtifactScan data 2026-05-29):
-            --   Status : tablet.TimerGui.TimerLabel.Text — "AVAILABLE NOW" = offerable,
-            --            else (e.g. "29m 58s") = on cooldown -> idle (auto-resumes).
-            --   Carry  : Character attr HeldCount (0=empty,1=carrying; CarryLimit=1).
-            --   Meat   : Interactions.Food children; FoodDataName=type, Value=amount;
-            --            offer-meat = Carcass-type (isOfferMeat); pick HIGHEST Value.
-            --   Pickup : try FULL (FoodPickup) first; if HeldCount didn't rise (tier-
-            --            locked/rejected), take a PIECE (FoodChunk).  [user's rule]
-            --   Offer  : WardenOffering:InvokeServer(name) — proximity-gated -> TP onto
-            --            the tablet first (in-region only).
+            -- ARTIFACT FARM (phase-split, 2026-06-14): HUNT meat (rotate regions via the notebook) →
+            -- OFFER at the shrine. We only travel to the shrine while HOLDING meat, so meat-hunting can
+            -- roam regions without the shrine-streaming logic dragging us back to the tablet every cycle.
+            --   Carry  : Character attr HeldCount (0=empty, 1=carrying; CarryLimit=1).
+            --   Meat   : Interactions.Food; FoodDataName=type, Value=amount; offer-meat = Carcass-type.
+            --   Pickup : FULL (FoodPickup) first; if HeldCount didn't rise (tier-locked) -> PIECE (FoodChunk).
+            --   Offer  : WardenOffering:InvokeServer(name) — proximity-gated -> TP onto the tablet first.
+            --   Anti-ban: every TP -> wait to settle -> fire -> snap back (no instant-spam).
             local root = getRoot(); local char = getChar()
             if not root or not char then return end
-            local tablet = getShrineTablet(shrineName)
-            if not tablet then
-                -- Region not loaded. TP to each known position for this shrine to
-                -- stream it in (multi-altar shrines like hardcore "Shadow" have a few;
-                -- single shrines have one). Never-visited shrines have none -> fly there.
-                for _, known in ipairs(tabletPositions(shrineName)) do
-                    pcall(function() root.CFrame = CFrame.new(known + Vector3.new(0, 8, 0)) end)
-                    task.wait(1.5)
-                    tablet = getShrineTablet(shrineName)
-                    if tablet then break end
-                end
-                if not tablet then return end      -- still streaming / unknown -> retry next cycle
-            end
-
-            -- Stop-on-complete: on cooldown -> idle (don't park / spam offers).
-            local avail = shrineAvailable(shrineName)
-            if avail == false then
-                if not _cooldownNotified[shrineName] then
-                    _cooldownNotified[shrineName] = true
-                    HSHub:Notify(('%s shrine selesai — cooldown (%s)')
-                        :format(shrineName, getShrineStatusText(shrineName) or '...'), 'ok', 3)
-                end
-                return
-            end
-            _cooldownNotified[shrineName] = nil    -- available again -> resume
-
-            -- V18 (ANTI-BAN, modeled on LUNAR's working pattern): after each TP, WAIT
-            -- ~0.8s so the position SETTLES before firing a remote, then snap BACK to
-            -- "home". Rapid TP-spam + staying far away was the ban signature (LUNAR's
-            -- own AutoGachaTokens does save->TP->wait(1)->act->TP-back). Slower = safer.
-            local home = root.CFrame   -- current spot (near shrine region); we return here
+            local home = root.CFrame                  -- where we are hunting; return here after offering
             local held = tonumber(char:GetAttribute('HeldCount')) or 0
+
+            -- ═══ HUNT PHASE ═══ get ONE meat: from the current region, else rotate to the next region.
             if held < 1 then
+                -- if we're standing AT the target shrine and it's on cooldown, idle (don't farm a done shrine)
+                if shrineAvailable(shrineName) == false then
+                    if not _cooldownNotified[shrineName] then
+                        _cooldownNotified[shrineName] = true
+                        HSHub:Notify(('%s shrine selesai — cooldown (%s)')
+                            :format(shrineName, getShrineStatusText(shrineName) or '...'), 'ok', 3)
+                    end
+                    return
+                end
+                _cooldownNotified[shrineName] = nil
                 local foodFolder = (interactions() or {}):FindFirstChild('Food')
                 local myTier = 0
                 pcall(function()
@@ -3701,9 +3719,11 @@ task.spawn(function()
                     end
                 end
                 if bestM and bestPart then
-                    rememberMeat(bestPart.Position, bestVal)   -- cache this meat-rich region (user idea)
+                    if huntIdx > 0 and REGION_COORDS[huntIdx] then    -- log this region's meat to the notebook panel
+                        regionLog[REGION_COORDS[huntIdx][1]] = bestVal; updateRegionPanel()
+                    end
                     pcall(function() root.CFrame = bestPart.CFrame + Vector3.new(0, 4, 0) end)
-                    task.wait(0.5)                 -- settle before firing (anti-detect; user-tuned 0.8->0.5)
+                    task.wait(0.5)                 -- settle before firing (anti-detect)
                     if not bestLocked then
                         local full = getRemote('FoodPickup')
                         if full then pcall(function() full:InvokeServer(bestM) end) end
@@ -3715,35 +3735,55 @@ task.spawn(function()
                         task.wait(0.6)
                     end
                     if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
-                        _meatBlacklist[bestM] = true   -- can't take this one; try next-highest
+                        _meatBlacklist[bestM] = true   -- can't take this one; try next-highest next cycle
                     end
-                elseif S.MeatRegionMemory then
-                    -- MEAT-REGION MEMORY (user idea): this region has NO usable meat. TP to the best
-                    -- remembered meat-rich region; next cycle grabs there, then carries it to the shrine.
-                    local spot = bestMeatSpot()
-                    if spot then
-                        pcall(function() root.CFrame = CFrame.new(spot.pos + Vector3.new(0, 8, 0)) end)
-                        task.wait(1.6)   -- let the region stream in (the grab happens next cycle, locally)
-                        local f2 = (interactions() or {}):FindFirstChild('Food')
-                        local got = false
-                        if f2 then for _, m in ipairs(f2:GetChildren()) do
-                            if isOfferMeat(m:GetAttribute('FoodDataName'))
-                                and (tonumber(m:GetAttribute('Value')) or 0) >= (S.MeatMinValue or 100) then got = true; break end
-                        end end
-                        if not got then spot.failAt = tick() end   -- nothing there now -> cool this spot 45s
+                elseif notebookOn() then
+                    huntNextRegion(root)               -- notebook: blacklist this empty region + rotate to the next
+                else
+                    -- manual farm, notebook OFF: go to the shrine's OWN region so we can scan its meat
+                    if not getShrineTablet(shrineName) then
+                        for _, known in ipairs(tabletPositions(shrineName)) do
+                            pcall(function() root.CFrame = CFrame.new(known + Vector3.new(0, 8, 0)) end)
+                            task.wait(1.5)
+                            if getShrineTablet(shrineName) then break end
+                        end
                     end
                 end
                 held = tonumber(char:GetAttribute('HeldCount')) or 0
             end
-            -- carrying now -> TP to shrine, WAIT to settle, offer, then snap BACK home.
+
+            -- ═══ OFFER PHASE ═══ holding meat -> go to the shrine tablet, offer, then back to the hunt spot.
             if held >= 1 then
-                S._farmProgressAt = tick()   -- progress signal for the autonomous anti-stuck watchdog
-                pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
-                task.wait(0.5)                     -- settle at the shrine before offering (user-tuned 0.9->0.5)
-                local wo = getRemote('WardenOffering')
-                if wo then pcall(function() wo:InvokeServer(offerNameOf(shrineName)) end) end
-                task.wait(0.4)
-                pcall(function() root.CFrame = home end)   -- LUNAR-style snap back
+                local tablet = getShrineTablet(shrineName)
+                if not tablet then
+                    -- shrine not streamed (we hunted in another region) -> TP to its known position(s).
+                    for _, known in ipairs(tabletPositions(shrineName)) do
+                        pcall(function() root.CFrame = CFrame.new(known + Vector3.new(0, 8, 0)) end)
+                        task.wait(1.5)
+                        tablet = getShrineTablet(shrineName)
+                        if tablet then break end
+                    end
+                end
+                if tablet then
+                    if shrineAvailable(shrineName) == false then
+                        -- went on cooldown while carrying -> notify once, KEEP the meat; getActiveShrine /
+                        -- the orchestrator switches us to another available shrine to offer at.
+                        if not _cooldownNotified[shrineName] then
+                            _cooldownNotified[shrineName] = true
+                            HSHub:Notify(('%s shrine cooldown (%s)')
+                                :format(shrineName, getShrineStatusText(shrineName) or '...'), 'ok', 3)
+                        end
+                    else
+                        _cooldownNotified[shrineName] = nil
+                        S._farmProgressAt = tick()     -- progress signal for the autonomous anti-stuck watchdog
+                        pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
+                        task.wait(0.5)                 -- settle at the shrine before offering
+                        local wo = getRemote('WardenOffering')
+                        if wo then pcall(function() wo:InvokeServer(offerNameOf(shrineName)) end) end
+                        task.wait(0.4)
+                    end
+                    pcall(function() if getRoot() then getRoot().CFrame = home end end)   -- snap back to the hunt region
+                end
             end
         end) end
 
@@ -4176,15 +4216,15 @@ do
         return INVIS[tostring(nm):lower()] == true
     end
 
-    -- realm-hop checks these 3 by name (the "3 priority artifacts" before hardcore Shadow).
-    local SHRINE_PRIORITY = { 'Ardor', 'Novus', 'Eigion' }
-    -- autonomous farm order = USER's toggle order (shrineActivationOrder), same as the manual
-    -- getActiveShrine. first toggled ON = highest priority. shrineActivationOrder is kept in
-    -- sync by the shrine toggle callbacks (added on ON, removed on OFF); the orchestrator's
-    -- per-cycle S.ArtifactToggles reduction does NOT touch it, so it stays the full enabled set.
+    -- AUTONOMOUS farm has a FIXED shrine set (no UI picker — user confirmed): normal realm = the 3
+    -- priority artifacts Ardor>Eigion>Novus; hardcore realm = the Shadow altars (share one cooldown).
+    -- It does NOT use the manual Artifacts-tab toggle order (shrineActivationOrder).
+    local AUTO_SHRINES_NORMAL   = { 'Ardor', 'Eigion', 'Novus' }
+    local AUTO_SHRINES_HARDCORE = { 'Shadow Up', 'Shadow Middle', 'Shadow Down' }
     local function orderedShrines()
+        local src = IS_HARDCORE and AUTO_SHRINES_HARDCORE or AUTO_SHRINES_NORMAL
         local order = {}
-        for _, n in ipairs(shrineActivationOrder) do order[#order + 1] = n end
+        for _, n in ipairs(src) do order[#order + 1] = n end
         return order
     end
 
@@ -4394,11 +4434,9 @@ do
     -- ═══ ORCHESTRATOR ═══
     local completed = {}            -- shrine name -> tick() when its cooldown ENDS (re-farm after that)
     local function onCD(n) local e = completed[n]; return e and tick() < e end   -- live cooldown check (auto-expires)
-    local noMeat = {}               -- shrine -> tick() when its region had NO usable meat
     local lastActive, activeSince = nil, 0
-    local NO_MEAT_SECS, NOMEAT_SKIP = 9, 120    -- give up a region after 9s of no pickup; re-check it after 120s
+    local NO_MEAT_SECS = 9          -- after this long with no offer progress, show "hunting meat" status
     local lastInvis, lastRealmHop = 0, 0
-    local REALM_NORMAL, REALM_HARDCORE = 5233782396, 136015760267602
     local busy, managing = false, false
     local autoArmed = false   -- true after the 5s start-countdown for the current ON session
     task.spawn(function()
@@ -4429,7 +4467,7 @@ do
                         -- LOBBY -> spawn
                         task.wait(0.6 + math.random())
                         spawnFor(mode)
-                        noMeat = {}; lastActive = nil   -- fresh life: re-scan regions (shrine cooldowns are server-side -> KEEP completed)
+                        lastActive = nil; huntIdx = 0   -- fresh life: re-scan from the shrine (KEEP completed cooldowns + region blacklist = server-side)
                     else
                         -- IN GAME -> hide-scent (+ stealth invis) + priority farm + hop
                         S.AutoScentHidden = true
@@ -4437,19 +4475,15 @@ do
                             lastInvis = tick()
                             pcall(function() fire('ActivateAbility', 'Invisibility') end)
                         end
-                        local order  = orderedShrines()
+                        local order  = orderedShrines()   -- FIXED autonomous set (Ardor>Eigion>Novus / Shadow)
                         local target = math.min(5, #order)
                         local active
                         local skipped = nil
-                        -- pick the FIRST enabled shrine in USER priority order (orderedShrines =
-                        -- shrineActivationOrder) that is NOT on cooldown, NOT no-meat-flagged, and
-                        -- reachable. This is strict priority by the user's toggle order: a lower-
-                        -- priority shrine is only reached once every higher one is on cooldown (done).
+                        -- pick the FIRST shrine (in the fixed order) that is NOT on cooldown and reachable.
+                        -- Meat is NOT a selection factor anymore — the farm loop rotates regions to find it,
+                        -- so a shrine whose own region is empty still stays the target.
                         for _, n in ipairs(order) do
-                            -- meat-memory ON: never skip an empty region (the farm loop fetches meat from a
-                            -- remembered region instead). OFF: skip an empty region for NOMEAT_SKIP secs.
-                            local skipNoMeat = (not S.MeatRegionMemory) and noMeat[n] and (tick() - noMeat[n] < NOMEAT_SKIP)
-                            if not onCD(n) and not skipNoMeat then       -- skip shrines STILL on cooldown
+                            if not onCD(n) then                          -- skip shrines STILL on cooldown
                                 local av = shrineAvailable(n)
                                 if av == false then
                                     -- on cooldown -> remember WHEN it ends (from the live tablet timer) so it
@@ -4478,14 +4512,13 @@ do
                         if doneN >= target then active = nil end
                         for n in pairs(S.ArtifactToggles) do S.ArtifactToggles[n] = (n == active) end
                         if active then
-                            -- ANTI-STUCK watchdog: the farm loop stamps S._farmProgressAt each time it
-                            -- carries meat. If NO progress for NO_MEAT_SECS while on this shrine, its
-                            -- region has no usable meat -> mark it + move to the next region next cycle.
+                            -- the farm loop stamps S._farmProgressAt each time it offers meat. If no progress
+                            -- for NO_MEAT_SECS, it's hunting meat across regions (the farm loop is rotating) —
+                            -- just reflect that in the status; the rotation/hop is handled by the farm loop.
                             if active ~= lastActive then lastActive = active; activeSince = tick() end
                             if (S._farmProgressAt or 0) > activeSince then activeSince = S._farmProgressAt end
                             if tick() - activeSince > NO_MEAT_SECS then
-                                noMeat[active] = tick(); activeSince = tick()
-                                statusSet('no meat @' .. active .. ' -> scan next region')
+                                statusSet(('farming %s — cari meat (rotasi region)'):format(active))
                             else
                                 statusSet(('farming %s (%d/%d done)'):format(active, doneN, target))
                             end
@@ -4557,7 +4590,7 @@ do
     Sec:AddTextbox({ Name = 'Hardcore realm Y', Default = '360', Callback = function(v) S.RealmHardcoreY = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Normal realm X', Default = '570', Callback = function(v) S.RealmNormalX = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Normal realm Y', Default = '200', Callback = function(v) S.RealmNormalY = tonumber(v) or 0 end })
-    Sec:AddLabel('Priority: Ardor > Novus > Eigion > rest. Invisible list: 33 creatures.', Color3.fromRGB(150, 150, 180))
+    Sec:AddLabel('Farms Ardor > Eigion > Novus (hardcore: Shadow). Meat auto-rotates regions. Invis list: 33.', Color3.fromRGB(150, 150, 180))
 end
 
 -- ════════════════════════════════════════════════════════════════════
