@@ -3477,6 +3477,11 @@ end
 -- ("lanjut"). Cleared on server/realm hop (fresh server = shrine ready again).
 -- ════════════════════════════════════════════════════════════════════
 local _shrineCooldownUntil = {}   -- offerName -> tick() when it becomes farmable again
+-- MEAT REGIONS (separate from shrines): a region is blacklisted when, after scanning,
+-- it has NO meat >= MeatMinValue. Holds until server-hop / leave. regionMeatLog mirrors
+-- each region's best meat value for the on-screen log panel.
+local _regionEmpty   = {}   -- region (shrine display name) -> true if scanned and empty this server
+local regionMeatLog  = {}   -- region -> best meat Value found (0 = none)
 local function parseCooldownSecs(txt)
     if not txt then return nil end
     local m = tonumber(txt:match('(%d+)%s*[mM]')) or 0
@@ -3505,6 +3510,10 @@ end
 local function clearShrineCooldowns()
     for k in pairs(_shrineCooldownUntil) do _shrineCooldownUntil[k] = nil end
 end
+local function clearRegionBlacklist()   -- on hop / leave: every region scannable again
+    for k in pairs(_regionEmpty)  do _regionEmpty[k]  = nil end
+    for k in pairs(regionMeatLog) do regionMeatLog[k] = nil end
+end
 
 -- Return the shrine to farm next.
 -- Walks shrineActivationOrder (first toggled ON = highest priority), then falls back
@@ -3516,13 +3525,13 @@ local function getActiveShrine()
     local fallback = nil
     for _, n in ipairs(shrineActivationOrder) do
         if S.ArtifactToggles[n] then
-            if not shrineOnCooldown(n) then return n end   -- ready (or unknown) -> farm now
-            fallback = fallback or n                        -- remember first cooldown one
+            if not shrineOnCooldown(n) and not _regionEmpty[n] then return n end   -- ready + has meat
+            fallback = fallback or n                        -- remember first skipped one
         end
     end
     for n, on in pairs(S.ArtifactToggles) do                -- orchestrator-driven (no order queue)
         if on and n ~= fallback then
-            if not shrineOnCooldown(n) then return n end
+            if not shrineOnCooldown(n) and not _regionEmpty[n] then return n end
             fallback = fallback or n
         end
     end
@@ -3547,7 +3556,10 @@ task.spawn(function()
             pcall(function()
                 stampShrineCooldown(name)   -- keep the time-based cooldown latch fresh while in-region
                 local txt = getShrineStatusText(name)
-                lbl:Set(txt and ('Status: ' .. txt) or 'Status: — (luar region)')
+                local meat = regionMeatLog[name]
+                local meatStr = (meat == nil) and ''
+                    or (meat > 0 and (' · meat ' .. meat) or (_regionEmpty[name] and ' · NO meat (skip)' or ''))
+                lbl:Set((txt and ('Status: ' .. txt) or 'Status: — (luar region)') .. meatStr)
             end)
         end
         -- server-wide carcass stats (offer-meat only; matches autofarm filter)
@@ -3588,22 +3600,30 @@ task.spawn(function()
             --            the tablet first (in-region only).
             local root = getRoot(); local char = getChar()
             if not root or not char then return end
+
+            -- TP RATE-LIMITER: never teleport more often than every 0.6s (the one hard
+            -- pacing rule). Grab + offer fire instantly between TPs.
+            local function tpTo(pos)
+                local dt = tick() - (S._lastFarmTP or 0)
+                if dt < 0.6 then task.wait(0.6 - dt) end
+                pcall(function() root.CFrame = CFrame.new(pos) end)
+                S._lastFarmTP = tick()
+            end
+
+            -- Be IN this shrine's region (that streams its meat). If the tablet isn't
+            -- loaded, TP to each known position to stream the region in.
             local tablet = getShrineTablet(shrineName)
             if not tablet then
-                -- Region not loaded. TP to each known position for this shrine to
-                -- stream it in (multi-altar shrines like hardcore "Shadow" have a few;
-                -- single shrines have one). Never-visited shrines have none -> fly there.
                 for _, known in ipairs(tabletPositions(shrineName)) do
-                    pcall(function() root.CFrame = CFrame.new(known + Vector3.new(0, 8, 0)) end)
-                    task.wait(1.5)
+                    tpTo(known + Vector3.new(0, 8, 0))
+                    task.wait(0.6)                 -- let the region stream in
                     tablet = getShrineTablet(shrineName)
                     if tablet then break end
                 end
-                if not tablet then return end      -- still streaming / unknown -> retry next cycle
+                if not tablet then return end      -- unknown region -> orchestrator handles next cycle
             end
 
-            -- Stop-on-complete: on cooldown -> idle (don't park / spam offers).
-            -- (latch covers out-of-region too; auto-resumes the instant the timer elapses)
+            -- Shrine (deposit target) on cooldown -> idle; auto-resumes when the timer resets.
             if shrineOnCooldown(shrineName) then
                 if not _cooldownNotified[shrineName] then
                     _cooldownNotified[shrineName] = true
@@ -3612,69 +3632,77 @@ task.spawn(function()
                 end
                 return
             end
-            _cooldownNotified[shrineName] = nil    -- available again -> resume
+            _cooldownNotified[shrineName] = nil
 
-            -- V18 (ANTI-BAN, modeled on LUNAR's working pattern): after each TP, WAIT
-            -- ~0.8s so the position SETTLES before firing a remote, then snap BACK to
-            -- "home". Rapid TP-spam + staying far away was the ban signature (LUNAR's
-            -- own AutoGachaTokens does save->TP->wait(1)->act->TP-back). Slower = safer.
-            local home = root.CFrame   -- current spot (near shrine region); we return here
-            local held = tonumber(char:GetAttribute('HeldCount')) or 0
-            if held < 1 then
+            -- Best offer-meat (Carcass, Value >= MeatMinValue) streamed in THIS region.
+            local myTier = 0
+            pcall(function()
+                local d = char:FindFirstChild('Data')
+                myTier = (d and tonumber(d:GetAttribute('Tier'))) or 0
+            end)
+            local function findBestMeat()
                 local foodFolder = (interactions() or {}):FindFirstChild('Food')
-                local myTier = 0
-                pcall(function()
-                    local d = char:FindFirstChild('Data')
-                    myTier = (d and tonumber(d:GetAttribute('Tier'))) or 0
-                end)
                 local bestM, bestPart, bestVal, bestLocked = nil, nil, -1, false
                 if foodFolder then
                     for _, m in ipairs(foodFolder:GetChildren()) do
                         if isOfferMeat(m:GetAttribute('FoodDataName'))
-                            and not m:GetAttribute('Held')
-                            and not _meatBlacklist[m] then
-                            local val    = tonumber(m:GetAttribute('Value')) or 0
-                            local t      = tonumber(m:GetAttribute('T'))
+                            and not m:GetAttribute('Held') and not _meatBlacklist[m] then
+                            local val = tonumber(m:GetAttribute('Value')) or 0
+                            local t   = tonumber(m:GetAttribute('T'))
                             local locked = (t ~= nil and myTier > 0 and myTier < t) or false
-                            if val >= (S.MeatMinValue or 100) and not (locked and val <= 15) then  -- min-value floor + tier-lock skip
+                            if val >= (S.MeatMinValue or 100) and not (locked and val <= 15) then
                                 local part = m:IsA('BasePart') and m
                                     or (m:IsA('Model') and (m.PrimaryPart or m:FindFirstChildWhichIsA('BasePart')))
-                                if part and val > bestVal then
-                                    bestM, bestPart, bestVal, bestLocked = m, part, val, locked
-                                end
+                                if part and val > bestVal then bestM, bestPart, bestVal, bestLocked = m, part, val, locked end
                             end
                         end
                     end
                 end
-                if bestM and bestPart then
-                    pcall(function() root.CFrame = bestPart.CFrame + Vector3.new(0, 4, 0) end)
-                    task.wait(0.5)                 -- settle before firing (anti-detect; user-tuned 0.8->0.5)
-                    if not bestLocked then
-                        local full = getRemote('FoodPickup')
-                        if full then pcall(function() full:InvokeServer(bestM) end) end
-                        task.wait(0.6)
-                    end
-                    if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
-                        local piece = getRemote('FoodChunk')
-                        if piece then pcall(function() piece:InvokeServer(bestM) end) end
-                        task.wait(0.6)
-                    end
-                    if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
-                        _meatBlacklist[bestM] = true   -- can't take this one; try next-highest
-                    end
+                return bestM, bestPart, bestVal, bestLocked
+            end
+
+            local held = tonumber(char:GetAttribute('HeldCount')) or 0
+            if held < 1 then
+                local bestM, bestPart, bestVal, bestLocked = findBestMeat()
+                if not bestM then task.wait(0.6); bestM, bestPart, bestVal, bestLocked = findBestMeat() end  -- region may still be streaming
+                if not bestM then
+                    -- NO meat >=100 in this region -> blacklist it (until hop/leave) + log it.
+                    _regionEmpty[shrineName] = true
+                    regionMeatLog[shrineName] = 0
+                    return
+                end
+                regionMeatLog[shrineName] = bestVal      -- save region's best meat for the panel
+                tpTo(bestPart.Position + Vector3.new(0, 4, 0))     -- TP to meat (rate-limited)
+                if not bestLocked then
+                    local full = getRemote('FoodPickup')
+                    if full then pcall(function() full:InvokeServer(bestM) end) end
+                    task.wait(0.15)                       -- grab ~instant
+                end
+                if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
+                    local piece = getRemote('FoodChunk')
+                    if piece then pcall(function() piece:InvokeServer(bestM) end) end
+                    task.wait(0.15)
+                end
+                if (tonumber(char:GetAttribute('HeldCount')) or 0) < 1 then
+                    _meatBlacklist[bestM] = true          -- can't take this one; try next-highest next cycle
                 end
                 held = tonumber(char:GetAttribute('HeldCount')) or 0
             end
-            -- carrying now -> TP to shrine, WAIT to settle, offer, then snap BACK home.
+
+            -- Carrying -> TP to the shrine (deposit target) and offer.
             if held >= 1 then
-                S._farmProgressAt = tick()   -- progress signal for the autonomous anti-stuck watchdog
-                pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
-                task.wait(0.5)                     -- settle at the shrine before offering (user-tuned 0.9->0.5)
+                S._farmProgressAt = tick()
+                tpTo(tablet.Position + Vector3.new(0, 6, 0))       -- TP to shrine (rate-limited)
+                local before = tonumber(char:GetAttribute('HeldCount')) or held
                 local wo = getRemote('WardenOffering')
                 if wo then pcall(function() wo:InvokeServer(offerNameOf(shrineName)) end) end
-                task.wait(0.5)                     -- let the tablet's TimerGui flip to a countdown
-                pcall(function() stampShrineCooldown(shrineName) end)  -- latch the REAL cooldown (we're on the tablet)
-                pcall(function() root.CFrame = home end)   -- LUNAR-style snap back
+                task.wait(0.2)                            -- offer ~instant
+                pcall(function() stampShrineCooldown(shrineName) end)
+                local after = tonumber(char:GetAttribute('HeldCount')) or before
+                if after < before then
+                    local key = offerNameOf(shrineName)
+                    if not _shrineCooldownUntil[key] then _shrineCooldownUntil[key] = tick() + 60 end
+                end
             end
         end) end
 
@@ -4317,6 +4345,7 @@ do
     local function serverHop()
         statusSet('server hop (shrines done)')
         clearShrineCooldowns()   -- fresh server -> shrine timers reset
+        clearRegionBlacklist()   -- fresh server -> every region scannable again
         pcall(function()
             local ok, raw = pcall(function()
                 return game:HttpGet('https://games.roblox.com/v1/games/' .. tostring(game.PlaceId)
@@ -4370,6 +4399,7 @@ do
     local function realmSwitch(tx, ty)
         if tx == 0 and ty == 0 then statusSet('realm coord not set'); return false end
         clearShrineCooldowns()                       -- new realm/server -> shrine timers reset
+        clearRegionBlacklist()                       -- new realm/server -> regions scannable again
         statusSet('realm switch -> return to lobby')
         if not returnToLobby() then statusSet('realm switch: lobby not reached (timeout)'); panelShow(); return false end
         panelHide(); task.wait(0.6)
@@ -4379,9 +4409,7 @@ do
     end
 
     -- ═══ ORCHESTRATOR ═══
-    local noMeat = {}               -- shrine -> tick() when its region had NO usable meat
-    local lastActive, activeSince = nil, 0
-    local NO_MEAT_SECS, NOMEAT_SKIP = 9, 120    -- give up a region after 9s of no pickup; re-check it after 120s
+    -- (region blacklist now lives in _regionEmpty, set by the farm loop on an empty scan)
     local lastInvis, lastHop, lastRealmHop = 0, 0, 0
     local REALM_NORMAL, REALM_HARDCORE = 5233782396, 136015760267602
     local busy, managing = false, false
@@ -4402,7 +4430,8 @@ do
                         -- LOBBY -> spawn
                         task.wait(0.6 + math.random())
                         spawnFor(mode)
-                        noMeat = {}; lastActive = nil   -- fresh life resets no-meat memory (cooldowns persist in-server)
+                        -- (region blacklist + cooldowns persist in-server across respawns;
+                        --  they reset only on server-hop / realm-switch)
                     else
                         -- IN GAME -> hide-scent (+ stealth invis) + priority farm + hop
                         S.AutoScentHidden = true
@@ -4410,30 +4439,23 @@ do
                             lastInvis = tick()
                             pcall(function() fire('ActivateAbility', 'Invisibility') end)
                         end
-                        local order  = orderedShrines()
-                        local target = math.min(5, #order)
+                        local order = orderedShrines()
                         local active, skipped = nil, nil
-                        local cdCount = 0
+                        local cdCount, emptyCount = 0, 0
                         for _, n in ipairs(order) do
                             if shrineOnCooldown(n) then
-                                cdCount = cdCount + 1               -- on cooldown -> SKIP (auto-resumes when timer elapses)
+                                cdCount = cdCount + 1               -- deposit target on cooldown -> skip
+                            elseif _regionEmpty[n] then
+                                emptyCount = emptyCount + 1         -- region scanned, no meat >=100 (this server)
+                            elseif shrineReachable(n) then
+                                if not active then active = n end   -- first reachable region with a usable shrine
                             else
-                                local skipNoMeat = noMeat[n] and (tick() - noMeat[n] < NOMEAT_SKIP)
-                                if not skipNoMeat then
-                                    if shrineReachable(n) then
-                                        if not active then active = n end  -- first farmable + reachable (priority order)
-                                    else
-                                        skipped = skipped or n             -- pos unknown -> try next
-                                    end
-                                end
+                                skipped = skipped or n              -- shrine pos unknown -> try next
                             end
                         end
-                        local doneN = cdCount
-                        -- REALM ROTATION (re-evaluated LIVE each cycle; resumes automatically if a
-                        -- cooldown resets). normal: Ardor+Novus+Eigion all cooldown -> rotate to
-                        -- HARDCORE (farm Shadow). hardcore: Shadow cooldown -> rotate back to NORMAL.
-                        -- realmSwitch returns to lobby (instant, with detection) then taps the
-                        -- Realms menu + target realm (all viewport-scaled for any device).
+                        -- REALM ROTATION (cooldown-based, live each cycle): normal -> when the 3
+                        -- priority shrines are all on cooldown, rotate to HARDCORE (Shadow);
+                        -- hardcore -> when Shadow is on cooldown, rotate back to NORMAL.
                         if S.RealmHopArtifact and (tick() - lastRealmHop > 60) then
                             if (not IS_HARDCORE) and shrineOnCooldown('Ardor') and shrineOnCooldown('Novus') and shrineOnCooldown('Eigion') then
                                 lastRealmHop = tick(); statusSet('3 priority cooldown -> rotate to HARDCORE')
@@ -4443,31 +4465,20 @@ do
                                 realmSwitch(S.RealmNormalX, S.RealmNormalY); return
                             end
                         end
-                        if doneN >= target then active = nil end
                         for n in pairs(S.ArtifactToggles) do S.ArtifactToggles[n] = (n == active) end
                         if active then
-                            -- ANTI-STUCK watchdog: the farm loop stamps S._farmProgressAt each time it
-                            -- carries meat. If NO progress for NO_MEAT_SECS while on this shrine, its
-                            -- region has no usable meat -> mark it + move to the next region next cycle.
-                            if active ~= lastActive then lastActive = active; activeSince = tick() end
-                            if (S._farmProgressAt or 0) > activeSince then activeSince = S._farmProgressAt end
-                            if tick() - activeSince > NO_MEAT_SECS then
-                                noMeat[active] = tick(); activeSince = tick()
-                                statusSet('no meat @' .. active .. ' -> scan next region')
-                            else
-                                statusSet(('farming %s (%d/%d done)'):format(active, doneN, target))
-                            end
+                            statusSet(('farming %s  (cd %d · empty %d)'):format(active, cdCount, emptyCount))
+                        elseif emptyCount > 0 and (tick() - lastHop > 30) then
+                            -- nothing farmable AND at least one region ran out of meat >=100 -> hop
+                            lastHop = tick(); statusSet('all regions out of meat -> server hop')
+                            task.wait(1.0); serverHop()
+                        elseif skipped then
+                            statusSet(skipped .. ' pos unknown - run ShrineHunter')
+                        elseif cdCount > 0 and S.AutoFarmHopWhenDone and (tick() - lastHop > 30) then
+                            lastHop = tick(); statusSet('shrines on cooldown -> server hop')
+                            task.wait(1.0); serverHop()
                         else
-                            lastActive = nil
-                            local anyNoMeat = false
-                            for _, t in pairs(noMeat) do if tick() - t < NOMEAT_SKIP then anyNoMeat = true end end
-                            if skipped and not anyNoMeat then
-                                statusSet(skipped .. ' pos unknown - run ShrineHunter')
-                            else
-                                statusSet(anyNoMeat and ('no meat in any region (%d/%d) -> hop'):format(doneN, target)
-                                    or ('farm done %d/%d -> idle'):format(doneN, target))
-                                if S.AutoFarmHopWhenDone and (tick() - lastHop > 30) then lastHop = tick(); task.wait(1.5); serverHop() end
-                            end
+                            statusSet('idle (cd ' .. cdCount .. ')')
                         end
                     end
                 end)
