@@ -2986,6 +2986,7 @@ local REGION_COORDS = {
 local regionBlacklist  = {}   -- region name -> true (no meat >=100 this server; reset on reload/hop)
 local regionLog        = {}   -- region name -> best meat Value seen there (for the panel display)
 local huntIdx          = 0    -- which REGION_COORDS index we're currently hunting in (0 = at a shrine)
+local huntRescan       = false -- true after we've rescanned the current region once (2nd empty = confirmed empty)
 local regionPanelLabel        -- UI label (Artifacts tab) showing the notebook; assigned at tab build
 
 do
@@ -3584,10 +3585,21 @@ local function updateRegionPanel()
 end
 -- blacklist the current hunt region (empty) + TP to the next un-blacklisted region to scan next cycle.
 -- returns false when ALL regions are blacklisted (caller idles/hops; notebook resets on the next hop).
-local function huntNextRegion(root)
+-- Called when the CURRENT region shows no meat >=100.
+-- 1st time on a locked region: RESCAN in place — wait for it to finish re-streaming (the shrine
+--   round-trip unloads it) so we don't FALSE-blacklist a region that actually still has meat.
+--   No extra TP here -> the steady-state farm stays exactly 2 places (FOOD <-> SHRINE).
+-- 2nd time still empty: confirmed empty -> blacklist (until we leave/hop) + TP to the next region
+--   to scan it (this region-discovery TP is the only time a 3rd spot is touched).
+local function huntStep(root)
     if huntIdx > 0 and REGION_COORDS[huntIdx] then
+        if not huntRescan then
+            huntRescan = true
+            task.wait(1.6)                          -- let the region re-stream; rescan it next cycle (no TP)
+            return true
+        end
         local nm = REGION_COORDS[huntIdx][1]
-        regionBlacklist[nm] = true; regionLog[nm] = 0
+        regionBlacklist[nm] = true; regionLog[nm] = 0   -- confirmed empty -> remember as empty this server
     end
     local nextIdx
     for step = 1, #REGION_COORDS do
@@ -3595,11 +3607,11 @@ local function huntNextRegion(root)
         if not regionBlacklist[REGION_COORDS[i][1]] then nextIdx = i; break end
     end
     updateRegionPanel()
-    if not nextIdx then return false end
-    huntIdx = nextIdx
+    if not nextIdx then return false end            -- every region empty -> caller hops (notebook resets on reload)
+    huntIdx = nextIdx; huntRescan = false
     local rg = REGION_COORDS[nextIdx]
     pcall(function() (root or getRoot()).CFrame = CFrame.new(rg[2] + Vector3.new(0, 8, 0)) end)
-    task.wait(1.6)                              -- stream the region in; the actual scan is next cycle
+    task.wait(1.8)                                  -- stream the new region in; the actual scan is next cycle
     return true
 end
 -- THE single server-hop gate (user rule): hop ONLY when meat is truly gone everywhere.
@@ -3719,10 +3731,12 @@ task.spawn(function()
                     end
                 end
                 if bestM and bestPart then
+                    huntRescan = false               -- region still has meat -> reset the empty-confirm
                     if huntIdx > 0 and REGION_COORDS[huntIdx] then    -- log this region's meat to the notebook panel
                         regionLog[REGION_COORDS[huntIdx][1]] = bestVal; updateRegionPanel()
                     end
-                    pcall(function() root.CFrame = bestPart.CFrame + Vector3.new(0, 4, 0) end)
+                    home = bestPart.CFrame + Vector3.new(0, 4, 0)   -- after offering, come BACK to this food spot -> only 2 places: FOOD <-> SHRINE
+                    pcall(function() root.CFrame = home end)
                     task.wait(0.5)                 -- settle before firing (anti-detect)
                     if not bestLocked then
                         local full = getRemote('FoodPickup')
@@ -3738,7 +3752,7 @@ task.spawn(function()
                         _meatBlacklist[bestM] = true   -- can't take this one; try next-highest next cycle
                     end
                 elseif notebookOn() then
-                    huntNextRegion(root)               -- notebook: blacklist this empty region + rotate to the next
+                    huntStep(root)                     -- notebook: rescan-confirm empty, then blacklist + rotate to next
                 else
                     -- manual farm, notebook OFF: go to the shrine's OWN region so we can scan its meat
                     if not getShrineTablet(shrineName) then
@@ -4467,7 +4481,7 @@ do
                         -- LOBBY -> spawn
                         task.wait(0.6 + math.random())
                         spawnFor(mode)
-                        lastActive = nil; huntIdx = 0   -- fresh life: re-scan from the shrine (KEEP completed cooldowns + region blacklist = server-side)
+                        lastActive = nil; huntIdx = 0; huntRescan = false   -- fresh life: re-scan from the shrine (KEEP completed cooldowns + region blacklist = server-side)
                     else
                         -- IN GAME -> hide-scent (+ stealth invis) + priority farm + hop
                         S.AutoScentHidden = true
