@@ -7,7 +7,7 @@
 
     Game     : Creatures of Sonaria  (Roblox creature survival)
     Build    : HS-COS-V4
-    Bundled  : 2026-06-14
+    Bundled  : 2026-06-18
     Library  : HSHub_UI v1.0.0
 
     This is a BUNDLED file. Do not edit directly — instead edit
@@ -2688,6 +2688,23 @@ local function findNearestMud()  local i = interactions(); return i and findNear
 local function findNearestLake() local i = interactions(); return i and findNearestIn(i:FindFirstChild('Lakes')) end
 local function findNearestToken()local i = interactions(); return i and findNearestIn(i:FindFirstChild('TokenNodes')) end
 local function findNearestEgg() local i = interactions(); return i and findNearestIn(i:FindFirstChild('AbandonedEggSpawns')) end
+-- nearest ShoomPile (mush) — returns (pile, part). Skips the organizational "Nodes" folder;
+-- recurses for a BasePart so it works whether a pile is a Model or a Folder of parts.
+local function findNearestShoom()
+    local i = interactions(); local sp = i and i:FindFirstChild('ShoomPiles'); if not sp then return nil, nil end
+    local r = getRoot(); if not r then return nil, nil end
+    local best, bestPart, bestD = nil, nil, math.huge
+    for _, m in ipairs(sp:GetChildren()) do
+        if m.Name ~= 'Nodes' then
+            local part = m:IsA('BasePart') and m or m:FindFirstChildWhichIsA('BasePart', true)
+            if part then
+                local d = (part.Position - r.Position).Magnitude
+                if d < bestD then best, bestPart, bestD = m, part, d end
+            end
+        end
+    end
+    return best, bestPart
+end
 
 -- ── DIET-AWARE EATING (2026-06-07, from HardcoreEnvScan): the creature's diet is the
 -- Character.Data attribute 'ft' (Carnivore/Herbivore/Omnivore/Photovore/Photocarnivore).
@@ -2763,7 +2780,7 @@ local S = {
     FlySpeed=40, EnableFlySpeed=false,
     -- Autofarm
     AutoEat=false, AutoDrink=false, AutoMudRoll=false,
-    AutoGachaTokens=false,
+    AutoGachaTokens=false, AutoMush=false,
     MutationTarget='', AutoMutations=false,
     TraitTarget='', AutoTraits=false,
     AutoMissions=false,
@@ -2902,8 +2919,11 @@ do
         Callback=function(v) S.AutoDrink=v end })
     Sv:AddToggle({ Name='Auto Mud Roll', Key='AMR', Default=false, Callback=function(v) S.AutoMudRoll=v end })
 
-    local T = Tab:CreateSection('TOKEN AUTOFARM')
+    local T = Tab:CreateSection('TOKEN / MUSH')
     T:AddToggle({ Name='Auto Gacha Tokens', Key='AGT', Default=false, Callback=function(v) S.AutoGachaTokens=v end })
+    T:AddToggle({ Name='Auto Collect Mush', Key='AMSH', Default=false,
+        Tip='TP to each ShoomPile and collect it.',
+        Callback=function(v) S.AutoMush=v end })
 
     local MT = Tab:CreateSection('MUTATION/TRAIT AUTOFARM')
     MT:AddLabel('Leave dropdowns empty to save any mutation/trait')
@@ -2915,10 +2935,6 @@ do
         Values={'','Damage','Speed','Bite','Health','Stamina'},
         Callback=function(v) S.TraitTarget=v end })
     MT:AddToggle({ Name='Auto Trait(s)', Key='ATRAIT', Default=false, Callback=function(v) S.AutoTraits=v end })
-
-    local Mu = Tab:CreateSection('MUSH AUTOFARM')
-    Mu:AddLabel('Region Missions Status: Offline')
-    Mu:AddToggle({ Name='Auto Missions', Key='AMIS', Default=false, Callback=function(v) S.AutoMissions=v end })
 
     local R = Tab:CreateSection('RECOMMENDED')
     R:AddDropdown({ Name='Select Creature', Key='SCR', Default='',
@@ -2993,8 +3009,8 @@ do
     local Tab = Window:CreateTab('Artifacts', '✦')
 
     local InfoSec = Tab:CreateSection('SERVER MEAT')
-    meatCounterLabel = InfoSec:AddLabel('Meat di server: —', Color3.fromRGB(180, 220, 255))
-    regionPanelLabel = InfoSec:AddLabel('Notebook: —', Color3.fromRGB(170, 230, 180))
+    meatCounterLabel = InfoSec:AddLabel('Server meat: —', Color3.fromRGB(180, 220, 255))
+    regionPanelLabel = InfoSec:AddLabel('Regions: —', Color3.fromRGB(170, 230, 180))
 
     local function makeShrineToggle(section, name)
         local key = ('AF_%s'):format(name)
@@ -3579,7 +3595,7 @@ local function updateRegionPanel()
         if regionBlacklist[nm] then emptyN = emptyN + 1
         elseif (regionLog[nm] or 0) > 0 then have[#have + 1] = nm .. ':' .. tostring(regionLog[nm]) end
     end
-    local s = 'Notebook: meat[' .. (#have > 0 and table.concat(have, ', ') or '-') .. ']'
+    local s = 'Regions: meat[' .. (#have > 0 and table.concat(have, ', ') or '-') .. ']'
         .. (' · empty %d/%d'):format(emptyN, #REGION_COORDS)
     pcall(function() regionPanelLabel:Set(s) end)
 end
@@ -3600,6 +3616,7 @@ local function huntStep(root)
         end
         local nm = REGION_COORDS[huntIdx][1]
         regionBlacklist[nm] = true; regionLog[nm] = 0   -- confirmed empty -> remember as empty this server
+        if S._autoLog then S._autoLog('region ' .. nm .. ' empty -> next') end
     end
     local nextIdx
     for step = 1, #REGION_COORDS do
@@ -3648,13 +3665,13 @@ task.spawn(function()
         for name, lbl in pairs(shrineStatusLabels) do
             pcall(function()
                 local txt = getShrineStatusText(name)
-                lbl:Set(txt and ('Status: ' .. txt) or 'Status: — (luar region)')
+                lbl:Set(txt and ('Status: ' .. txt) or 'Status: — (out of region)')
             end)
         end
         -- server-wide carcass stats (offer-meat only; matches autofarm filter)
         if meatCounterLabel then pcall(function()
             local f = (interactions() or {}):FindFirstChild('Food')
-            if not f then meatCounterLabel:Set('Meat di server: Food folder ga ke-load'); return end
+            if not f then meatCounterLabel:Set('Server meat: food not loaded'); return end
             local count, total, best, bestName, bestPart = 0, 0, 0, nil, nil
             for _, m in ipairs(f:GetChildren()) do
                 if isOfferMeat(m:GetAttribute('FoodDataName')) then
@@ -3666,7 +3683,7 @@ task.spawn(function()
                     end
                 end
             end
-            meatCounterLabel:Set(('Meat di server: %d carcass · total %d · tertinggi %d (%s)')
+            meatCounterLabel:Set(('Server meat: %d carcass · total %d · top %d (%s)')
                 :format(count, total, best, tostring(bestName or '—')))
         end) end
     end
@@ -3699,7 +3716,7 @@ task.spawn(function()
                 if shrineAvailable(shrineName) == false then
                     if not _cooldownNotified[shrineName] then
                         _cooldownNotified[shrineName] = true
-                        HSHub:Notify(('%s shrine selesai — cooldown (%s)')
+                        HSHub:Notify(('%s shrine done — cooldown (%s)')
                             :format(shrineName, getShrineStatusText(shrineName) or '...'), 'ok', 3)
                     end
                     return
@@ -3778,6 +3795,7 @@ task.spawn(function()
                         if tablet then break end
                     end
                 end
+                if not tablet and S._autoLog then S._autoLog('no tablet @ ' .. shrineName .. ' - cant offer (stuck?)') end
                 if tablet then
                     if shrineAvailable(shrineName) == false then
                         -- went on cooldown while carrying -> notify once, KEEP the meat; getActiveShrine /
@@ -3790,6 +3808,7 @@ task.spawn(function()
                     else
                         _cooldownNotified[shrineName] = nil
                         S._farmProgressAt = tick()     -- progress signal for the autonomous anti-stuck watchdog
+                        if S._autoLog then S._autoLog('tp shrine + offer @ ' .. shrineName) end
                         pcall(function() root.CFrame = tablet.CFrame + Vector3.new(0, 6, 0) end)
                         task.wait(0.5)                 -- settle at the shrine before offering
                         local wo = getRemote('WardenOffering')
@@ -3900,6 +3919,27 @@ task.spawn(function()
                     if getRoot() then pcall(function() getRoot().CFrame = home end) end   -- snap back
                 else
                     pcall(function() invoke('GetSpawnedTokenRemote') end)   -- no token loaded -> fallback
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoMush: TP onto the nearest ShoomPile, settle, fire ShoomPileCollected, snap back (token-style)
+task.spawn(function()
+    while true do
+        task.wait(0.6)
+        if S.AutoMush then
+            pcall(function()
+                local root = getRoot(); if not root then return end
+                local pile, part = findNearestShoom()
+                if pile and part then
+                    local home = root.CFrame
+                    pcall(function() root.CFrame = part.CFrame + Vector3.new(0, 4, 0) end)
+                    task.wait(0.5)                         -- settle before firing (anti-detect)
+                    pcall(function() invoke('ShoomPileCollected', pile) end)
+                    task.wait(0.3)
+                    if getRoot() then pcall(function() getRoot().CFrame = home end) end   -- snap back
                 end
             end)
         end
@@ -4243,6 +4283,26 @@ do
     end
 
     local statusSet = function() end   -- replaced by the UI label setter below
+
+    -- ═══ LIVE STATUS LOG ═══ lightweight ring buffer (just strings) — powers the multi-line status
+    -- panel + the on-demand log export. NO continuous heavy capture, so no lag; it only records the
+    -- status transitions that already happen + a few farm-loop details while autonomous is running.
+    local statusLog   = {}             -- { {t, msg} } recent statuses (cap STATUS_MAX)
+    local STATUS_MAX  = 150
+    local statusLines = {}             -- visible label handles (filled at tab build)
+    local function pushStatus(msg)
+        msg = tostring(msg)
+        statusLog[#statusLog + 1] = { t = tick(), msg = msg }
+        if #statusLog > STATUS_MAX then table.remove(statusLog, 1) end
+        local n = #statusLines
+        for i = 1, n do
+            local e = statusLog[#statusLog - n + i]   -- last n entries, newest at the bottom line
+            local lbl = statusLines[i]
+            if lbl then pcall(function() lbl:Set(e and e.msg or '') end) end
+        end
+    end
+    -- detail logger callable from the module-level farm loop (records ONLY while autonomous runs)
+    S._autoLog = function(msg) if S.AutoNormalMode or S.AutoStealthMode then pushStatus(msg) end end
     local function panelHide() pcall(function() HSHub.ScreenGui.Enabled = false end) end
     local function panelShow() pcall(function() HSHub.ScreenGui.Enabled = true  end) end
 
@@ -4465,7 +4525,7 @@ do
                 autoArmed = true
                 for i = 5, 1, -1 do
                     if not (S.AutoStealthMode or S.AutoNormalMode) then break end
-                    statusSet(('auto farm mulai dalam %d...'):format(i))
+                    statusSet(('starting in %d...'):format(i))
                     task.wait(1)
                 end
             elseif mode and (not busy) then
@@ -4532,7 +4592,7 @@ do
                             if active ~= lastActive then lastActive = active; activeSince = tick() end
                             if (S._farmProgressAt or 0) > activeSince then activeSince = S._farmProgressAt end
                             if tick() - activeSince > NO_MEAT_SECS then
-                                statusSet(('farming %s — cari meat (rotasi region)'):format(active))
+                                statusSet(('farming %s — finding meat (rotating regions)'):format(active))
                             else
                                 statusSet(('farming %s (%d/%d done)'):format(active, doneN, target))
                             end
@@ -4543,16 +4603,16 @@ do
                             local nCool = 0
                             for _, n in ipairs(order) do if onCD(n) then nCool = nCool + 1 end end
                             if target == 0 then
-                                statusSet('no shrine enabled -> idle (pilih shrine di tab Artifacts)')
+                                statusSet('no shrine enabled — pick one in Artifacts')
                             elseif skipped then
                                 statusSet(skipped .. ' pos unknown - run ShrineHunter')
                             elseif nCool >= target then
                                 -- every enabled shrine on cooldown -> idle + wait for reset (never hop)
-                                statusSet(('%d/%d shrine cooldown -> idle (nunggu reset)'):format(nCool, target))
+                                statusSet(('%d/%d shrines on cooldown — waiting'):format(nCool, target))
                             elseif shouldHopNoMeat() then
-                                statusSet('no meat (region + memory habis) -> Auto Server Hop')
+                                statusSet('no meat anywhere — server hopping')
                             else
-                                statusSet('cari meat (region/memory)...')
+                                statusSet('finding meat...')
                             end
                         end
                     end
@@ -4570,130 +4630,216 @@ do
     end)
 
     -- ═══ UI TAB ═══
-    local Tab = Window:CreateTab('Autonomous', '🤖')
+    local Tab = Window:CreateTab('Autonomous', '>')
     local Sec = Tab:CreateSection('AUTONOMOUS FARM')
-    Sec:AddLabel('Auto-calibrates on load. Just pick ONE mode. Runs from lobby OR in-game.', Color3.fromRGB(180, 220, 255))
-    local statusLbl = Sec:AddLabel('Status: starting...', Color3.fromRGB(150, 205, 150))
-    statusSet = function(t) pcall(function() statusLbl:Set('Status: ' .. tostring(t)) end) end
+    Sec:AddLabel('Auto-calibrates on load. Pick ONE mode. Runs from lobby or in-game.', Color3.fromRGB(170, 200, 235))
+    statusSet = pushStatus
     -- auto-calibrate on load (no button): measure the tap OFFSET, retry, else keep default
     task.spawn(function()
         task.wait(3)
         for _ = 1, 4 do
             panelHide(); local ok, off = autoCalibrate(); panelShow()
-            if ok then statusSet(('auto-calibrated OFFSET=(%d,%d)'):format(math.floor(off.X), math.floor(off.Y))); return end
-            statusSet('auto-calibrate retry...'); task.wait(4)
+            if ok then statusSet(('calibrated offset (%d,%d)'):format(math.floor(off.X), math.floor(off.Y))); return end
+            statusSet('calibrate retry...'); task.wait(4)
         end
-        statusSet(('calibrate failed - default OFFSET=(%d,%d)'):format(math.floor(OFFSET.X), math.floor(OFFSET.Y)))
+        statusSet(('calibrate failed - default offset (%d,%d)'):format(math.floor(OFFSET.X), math.floor(OFFSET.Y)))
     end)
-    Sec:AddToggle({ Name = 'Normal Mode (any creature)', Key = 'AutoNormalMode', Default = false,
-        Tip = 'Spawn any ALIVE slot (restart if all dead), then farm priority shrines',
+    Sec:AddToggle({ Name = 'Auto Farm: Normal', Key = 'AutoNormalMode', Default = false,
+        Tip = 'Spawn any alive creature, then auto-farm shrines.',
         Callback = function(v) S.AutoNormalMode = v; if v then S.AutoStealthMode = false end end })
-    Sec:AddToggle({ Name = 'Stealth Mode (invisible creature)', Key = 'AutoStealthMode', Default = false,
-        Tip = 'Only spawn a creature with invisibility; auto-activates invis in game',
+    Sec:AddToggle({ Name = 'Auto Farm: Stealth', Key = 'AutoStealthMode', Default = false,
+        Tip = 'Spawn an invisible creature (auto-invis), then auto-farm.',
         Callback = function(v) S.AutoStealthMode = v; if v then S.AutoNormalMode = false end end })
     Sec:AddToggle({ Name = 'Server Hop when shrines done', Key = 'AutoFarmHopWhenDone', Default = false,
-        Tip = 'After 5/all shrines are deposited (cooldown), hop to a fresh server',
+        Tip = 'Hop to a fresh server once all shrines are on cooldown.',
         Callback = function(v) S.AutoFarmHopWhenDone = v end })
-    Sec:AddToggle({ Name = 'Realm Hop (normal 3 -> hardcore Shadow -> back)', Key = 'RealmHopArtifact', Default = false,
-        Tip = 'Normal: after Ardor+Novus+Eigion cooldown -> despawn + CLICK hardcore realm; hardcore Shadow done -> click normal. Set the realm-button coords below (find with TapTester).',
+    Sec:AddToggle({ Name = 'Auto Realm Hop', Key = 'RealmHopArtifact', Default = false,
+        Tip = 'When the 3 priority shrines finish, switch realm (normal <-> hardcore Shadow). Set coords below.',
         Callback = function(v) S.RealmHopArtifact = v end })
-    Sec:AddLabel('Realm-switch button coords (find with TapTester). Menu = 0 to skip.', Color3.fromRGB(150, 150, 180))
+    Sec:AddLabel('Realm button coords (0 = skip menu).', Color3.fromRGB(150, 150, 180))
     Sec:AddTextbox({ Name = 'Realms menu X', Default = '330', Callback = function(v) S.RealmMenuX = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Realms menu Y', Default = '365', Callback = function(v) S.RealmMenuY = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Hardcore realm X', Default = '550', Callback = function(v) S.RealmHardcoreX = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Hardcore realm Y', Default = '360', Callback = function(v) S.RealmHardcoreY = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Normal realm X', Default = '570', Callback = function(v) S.RealmNormalX = tonumber(v) or 0 end })
     Sec:AddTextbox({ Name = 'Normal realm Y', Default = '200', Callback = function(v) S.RealmNormalY = tonumber(v) or 0 end })
-    Sec:AddLabel('Farms Ardor > Eigion > Novus (hardcore: Shadow). Meat auto-rotates regions. Invis list: 33.', Color3.fromRGB(150, 150, 180))
+
+    -- ── LIVE STATUS (last 4 actions, newest at the bottom) ──
+    local LV = Tab:CreateSection('LIVE STATUS')
+    for i = 1, 4 do statusLines[i] = LV:AddLabel('', Color3.fromRGB(150, 205, 150)) end
+    pushStatus('idle')
+
+    -- ── REGION STATS ──
+    local RG = Tab:CreateSection('REGION STATS')
+    local nowLbl   = RG:AddLabel('Now: idle',    Color3.fromRGB(180, 220, 255))
+    local meatLbl  = RG:AddLabel('Meat: -',      Color3.fromRGB(170, 230, 180))
+    local emptyLbl = RG:AddLabel('Empty: 0/15',  Color3.fromRGB(230, 190, 150))
+    local cdLbl    = RG:AddLabel('Cooldowns: -', Color3.fromRGB(220, 200, 150))
+    local function exportLog()
+        local out = {}
+        out[#out+1] = '=== HS HUB CoS · Autonomous Log ==='
+        out[#out+1] = 'time : ' .. os.date('%Y-%m-%d %H:%M:%S')
+        out[#out+1] = ('place=%s  job=%s'):format(tostring(game.PlaceId), tostring(game.JobId))
+        out[#out+1] = ('mode : normal=%s stealth=%s serverhop=%s realmhop=%s memory=%s')
+            :format(tostring(S.AutoNormalMode), tostring(S.AutoStealthMode), tostring(S.AutoServerHopArtifact),
+                    tostring(S.RealmHopArtifact), tostring(S.MeatRegionMemory))
+        out[#out+1] = ('now  : farming=%s  hunt-region=%s')
+            :format(tostring(lastActive), tostring(huntIdx > 0 and REGION_COORDS[huntIdx] and REGION_COORDS[huntIdx][1] or '-'))
+        out[#out+1] = '--- regions ---'
+        for _, rg in ipairs(REGION_COORDS) do
+            local nm = rg[1]
+            local stt = regionBlacklist[nm] and 'EMPTY' or (((regionLog[nm] or 0) > 0) and ('meat ' .. tostring(regionLog[nm])) or 'unscanned')
+            out[#out+1] = ('  %-18s %s'):format(nm, stt)
+        end
+        out[#out+1] = '--- shrine cooldowns ---'
+        for n, e in pairs(completed) do
+            out[#out+1] = ('  %-12s %s'):format(n, (e and tick() < e) and (math.ceil((e - tick()) / 60) .. 'm left') or 'ready')
+        end
+        out[#out+1] = ('--- status log (last %d) ---'):format(#statusLog)
+        local t0 = statusLog[1] and statusLog[1].t or tick()
+        for _, e in ipairs(statusLog) do out[#out+1] = ('  [%6.1fs] %s'):format(e.t - t0, e.msg) end
+        local txt = table.concat(out, '\n')
+        local path = ('HSHub_cos_autolog_%d.txt'):format(os.time())
+        local ok = false
+        pcall(function() if writefile then writefile(path, txt); ok = true end end)
+        pcall(function() if setclipboard then setclipboard(txt) end end)
+        HSHub:Notify(ok and ('Log saved: ' .. path .. ' (+clipboard)') or 'Log copied to clipboard', 'ok', 4)
+    end
+    RG:AddButton({ Name = 'Export Log (this server)', Callback = exportLog })
+    RG:AddLabel('Hit Export when a bug happens, then send the file.', Color3.fromRGB(150, 150, 180))
+
+    -- stats refresh loop (1.5s, lightweight: read tables + set labels)
+    task.spawn(function()
+        while true do
+            task.wait(1.5)
+            pcall(function()
+                local hr = (huntIdx > 0 and REGION_COORDS[huntIdx]) and REGION_COORDS[huntIdx][1] or '-'
+                nowLbl:Set(('Now: %s  |  hunting %s'):format(tostring(lastActive or 'idle'), hr))
+                local have, empty = {}, {}
+                for _, rg in ipairs(REGION_COORDS) do
+                    local nm = rg[1]
+                    if regionBlacklist[nm] then empty[#empty + 1] = nm
+                    elseif (regionLog[nm] or 0) > 0 then have[#have + 1] = nm .. ':' .. tostring(regionLog[nm]) end
+                end
+                meatLbl:Set('Meat: ' .. (#have > 0 and table.concat(have, ', ') or '-'))
+                emptyLbl:Set(('Empty: %d/%d %s'):format(#empty, #REGION_COORDS,
+                    #empty > 0 and ('(' .. table.concat(empty, ', ') .. ')') or ''))
+                local cds = {}
+                for _, n in ipairs(orderedShrines()) do
+                    local e = completed[n]
+                    if e and tick() < e then cds[#cds + 1] = ('%s %dm'):format(n, math.ceil((e - tick()) / 60)) end
+                end
+                cdLbl:Set('Cooldowns: ' .. (#cds > 0 and table.concat(cds, ', ') or '-'))
+            end)
+        end
+    end)
 end
 
 -- ════════════════════════════════════════════════════════════════════
--- AUTO REGION MISSION (2026-06-11) — objectives via known/captured remotes
---   Sniff = SetMissionRemote("1") [ActionSpy] · Mud = Mud · Eat = Food (diet-aware) ·
---   Drink = DrinkRemote · Hit NPC = TP to nearest NPC + VIM-tap attack button (type X,Y).
---   Driven by the existing "Auto Missions" toggle (S.AutoMissions); eat/drink/mud loops
---   already pause while it is on, so the mission owns survival. Travel/survive = phase 2.
+-- AUTO REGION MISSION (self-tracked — no game-stat read). 2 modes:
+--   "1 by 1"     : TP each region, fully do its objectives (overshoot), then next region.
+--   "Rotational" : eat + drink in ONE home region; mud rotates across ALL regions.
+-- We count OUR OWN actions + overshoot the usual requirement, so completion never depends
+-- on reading the mission GUI. Temp memory = `track` (reset each run). Hit-NPC = phase 2.
 -- ════════════════════════════════════════════════════════════════════
 do
-    S.MissionSniffN = 5
-    S.MissionMudN   = 3
-    S.MissionTarget = 50          -- eat + drink until Hunger / Thirst >= this
-    S.MissionHitN   = 5
-    S.MissionAttackX, S.MissionAttackY = 0, 0   -- attack-button screen coord (0,0 = skip hit-NPC)
+    S.MissionMode   = '1 by 1'
+    S.MissionSniffN = 7
+    S.MissionMudN   = 5     -- usual need ~3, overshoot to 5 (fallback for fails)
+    S.MissionEatN   = 5
+    S.MissionDrinkN = 5
 
+    local track = { sniff = 0, mud = 0, eat = 0, drink = 0 }   -- temporary self-tracker
     local missionStatus = function() end
-    local VIM; pcall(function() VIM = game:GetService('VirtualInputManager') end)
-    local IS_PC = false
-    pcall(function() local p = game:GetService('UserInputService'):GetPlatform()
-        if p == Enum.Platform.Windows or p == Enum.Platform.OSX or p == Enum.Platform.UWP then IS_PC = true end end)
-
     local function statPct(name) return tonumber(tostring(hudStatText(name) or ''):match('(%d+)')) or 0 end
-    local function vimTap(x, y)
-        if not VIM then return end
-        pcall(function() VIM:SendMouseButtonEvent(x, y, 0, true, game, 1) end); task.wait(0.05)
-        pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 1) end)
-        if not IS_PC then
-            pcall(function() VIM:SendTouchEvent(1, 0, x, y) end); task.wait(0.05)
-            pcall(function() VIM:SendTouchEvent(1, 2, x, y) end)
+
+    local function tpRegion(idx)
+        local rg = REGION_COORDS[idx]; if not rg then return end
+        local root = getRoot()
+        if root then pcall(function() root.CFrame = CFrame.new(rg[2] + Vector3.new(0, 8, 0)) end) end
+        task.wait(1.6)   -- let the region stream in
+    end
+
+    -- ── objective runners: count OUR OWN actions, overshoot so failed attempts don't block ──
+    local function runSniff(n)
+        for _ = 1, n do
+            if not S.AutoMissions then return end
+            pcall(function() fire('SetMissionRemote', '1') end)
+            track.sniff = track.sniff + 1; missionStatus('sniff x' .. track.sniff)
+            task.wait(0.7)
         end
     end
-    -- nearest NPC: search workspace NPCs/Mobs folders + wild creatures in Characters (not self)
-    local function findNearestNPC()
-        local r = getRoot(); if not r then return nil end
-        local best, bestD = nil, 1e9
-        local function scan(folder, skipSelf)
-            if not folder then return end
-            for _, m in ipairs(folder:GetChildren()) do
-                if m:IsA('Model') and m:FindFirstChildOfClass('Humanoid')
-                    and not (skipSelf and (m.Name == LP.Name or m.Name == LP.DisplayName)) then
-                    local hrp = m:FindFirstChild('HumanoidRootPart') or m.PrimaryPart
-                    if hrp then local d = (hrp.Position - r.Position).Magnitude; if d < bestD then best, bestD = hrp, d end end
+    local function runMud(n)
+        for _ = 1, n do
+            if not S.AutoMissions then return end
+            local mud = findNearestMud(); local root = getRoot()
+            if mud and root then
+                local part = mud:IsA('Model') and (mud.PrimaryPart or mud:FindFirstChildWhichIsA('BasePart')) or mud
+                if part and part:IsA('BasePart') then
+                    pcall(function() root.CFrame = CFrame.new(part.Position + Vector3.new(0, 2, 0)) end); task.wait(0.4)
                 end
             end
+            pcall(function() fire('Mud', mud) end)
+            track.mud = track.mud + 1; missionStatus('mud x' .. track.mud)
+            task.wait(0.9)
         end
-        scan(workspace:FindFirstChild('NPCs'), false)
-        scan(workspace:FindFirstChild('Mobs'), false)
-        scan(workspace:FindFirstChild('Characters'), true)
-        return best
+    end
+    local function runEat(n)
+        local got, att = 0, 0
+        while S.AutoMissions and got < n and att < n * 3 do
+            att = att + 1
+            local before = statPct('Hunger')
+            if before >= 100 then break end        -- full -> can't eat more (do as many as possible)
+            local diet = creatureDiet()
+            local food = findNearestFood(function(m) return foodAllowedFor(diet, m:GetAttribute('FoodDataName')) end)
+            local root = getRoot()
+            if food and root then
+                local part = food:IsA('Model') and (food.PrimaryPart or food:FindFirstChild('Food') or food:FindFirstChildWhichIsA('BasePart')) or food
+                if part and part:IsA('BasePart') then pcall(function() root.CFrame = CFrame.new(part.Position - Vector3.new(0, 20, 0)) end) end
+            end
+            pcall(function() fire('Food', food) end); task.wait(0.5)
+            if statPct('Hunger') > before then got = got + 1; track.eat = track.eat + 1; missionStatus('eat x' .. track.eat) end
+        end
+    end
+    local function runDrink(n)
+        local got, att = 0, 0
+        while S.AutoMissions and got < n and att < n * 3 do
+            att = att + 1
+            local before = statPct('Thirst')
+            if before >= 100 then break end
+            local lake, lakePart = findDrinkableLake()
+            local root = getRoot()
+            if lake and lakePart and root then
+                pcall(function() root.CFrame = CFrame.new(lakePart.Position + Vector3.new(0, lakePart.Size.Y / 2 + 2, 0)) end)
+            end
+            pcall(function() fire('DrinkRemote', lake) end); task.wait(0.5)
+            if statPct('Thirst') > before then got = got + 1; track.drink = track.drink + 1; missionStatus('drink x' .. track.drink) end
+        end
     end
 
-    local function objSniff()
-        for _ = 1, S.MissionSniffN do
+    -- ── modes ──
+    local function mode1by1()
+        for i = 1, #REGION_COORDS do
             if not S.AutoMissions then return end
-            pcall(function() fire('SetMissionRemote', '1') end); task.wait(0.8)
+            missionStatus('region: ' .. REGION_COORDS[i][1])
+            tpRegion(i)
+            runSniff(S.MissionSniffN)
+            runMud(S.MissionMudN)
+            runEat(S.MissionEatN)
+            runDrink(S.MissionDrinkN)
         end
     end
-    local function objMud()
-        for _ = 1, S.MissionMudN do
+    local function modeRotational()
+        missionStatus('home: eat/drink')              -- eat + drink + sniff in ONE home region (region 1)
+        tpRegion(1)
+        runSniff(S.MissionSniffN)
+        runEat(S.MissionEatN)
+        runDrink(S.MissionDrinkN)
+        for i = 1, #REGION_COORDS do                  -- mud rotates across all regions
             if not S.AutoMissions then return end
-            local mud = findNearestMud()
-            if mud then
-                local part = mud:IsA('Model') and (mud.PrimaryPart or mud:FindFirstChildWhichIsA('BasePart')) or mud
-                local root = getRoot()
-                if part and root then pcall(function() root.CFrame = CFrame.new(part.Position + Vector3.new(0, 2, 0)) end) end
-            end
-            pcall(function() fire('Mud', mud) end); task.wait(1)
-        end
-    end
-    local function objConsume(remoteName, finder, statName)
-        local n = 0
-        while S.AutoMissions and statPct(statName) < S.MissionTarget and n < 30 do
-            local f = finder()
-            if f then
-                local part = f:IsA('Model') and (f.PrimaryPart or f:FindFirstChildWhichIsA('BasePart')) or f
-                local root = getRoot()
-                if part and root then pcall(function() root.CFrame = CFrame.new(part.Position - Vector3.new(0, 18, 0)) end) end
-            end
-            pcall(function() fire(remoteName, f) end); task.wait(0.3); n = n + 1
-        end
-    end
-    local function objHitNpc()
-        if S.MissionAttackX == 0 and S.MissionAttackY == 0 then return end   -- attack coord not set yet
-        for _ = 1, S.MissionHitN do
-            if not S.AutoMissions then return end
-            local npc, root = findNearestNPC(), getRoot()
-            if npc and root then pcall(function() root.CFrame = npc.CFrame * CFrame.new(0, 0, 6) end); task.wait(0.4) end
-            vimTap(S.MissionAttackX, S.MissionAttackY); task.wait(0.8)
+            missionStatus('mud @ ' .. REGION_COORDS[i][1])
+            tpRegion(i)
+            runMud(S.MissionMudN)
         end
     end
 
@@ -4701,28 +4847,31 @@ do
         while true do
             task.wait(2)
             if S.AutoMissions and getChar() then
+                track = { sniff = 0, mud = 0, eat = 0, drink = 0 }   -- reset the self-tracker each run
                 pcall(function()
-                    missionStatus('sniff');  objSniff()
-                    missionStatus('mud');    objMud()
-                    missionStatus('eat');    objConsume('Food', function() return findNearestFood(function(m) return foodAllowedFor(creatureDiet(), m:GetAttribute('FoodDataName')) end) end, 'Hunger')
-                    missionStatus('drink');  objConsume('DrinkRemote', findNearestLake, 'Thirst')
-                    missionStatus('hit NPC'); objHitNpc()
-                    missionStatus('cycle done')
+                    if S.MissionMode == 'Rotational' then modeRotational() else mode1by1() end
                 end)
-                task.wait(10)
+                missionStatus(('done · sniff%d mud%d eat%d drink%d'):format(track.sniff, track.mud, track.eat, track.drink))
+                task.wait(8)
+            elseif not S.AutoMissions then
+                missionStatus('off')
             end
         end
     end)
 
-    -- UI (config; the on/off is the existing "Auto Missions" toggle in Autofarm tab)
+    -- ── UI ──
     local Tab = Window:CreateTab('Mission', '★')
-    local Sec = Tab:CreateSection('REGION MISSION')
-    Sec:AddLabel('On = "Auto Missions" toggle (Autofarm tab). Type attack-button X,Y to enable hit-NPC.', Color3.fromRGB(180, 220, 255))
-    local stLbl = Sec:AddLabel('Status: idle', Color3.fromRGB(150, 205, 150))
+    local Sec = Tab:CreateSection('AUTO REGION MISSION')
+    Sec:AddToggle({ Name = 'Auto Region Mission', Key = 'AMIS', Default = false, Callback = function(v) S.AutoMissions = v end })
+    Sec:AddDropdown({ Name = 'Mode', Key = 'MMODE', Default = '1 by 1', Values = { '1 by 1', 'Rotational' }, Callback = function(v) S.MissionMode = v end })
+    local stLbl = Sec:AddLabel('Status: off', Color3.fromRGB(150, 205, 150))
     missionStatus = function(t) pcall(function() stLbl:Set('Status: ' .. tostring(t)) end) end
-    Sec:AddTextbox({ Name = 'Attack button X', Default = '0', Callback = function(v) S.MissionAttackX = tonumber(v) or 0 end })
-    Sec:AddTextbox({ Name = 'Attack button Y', Default = '0', Callback = function(v) S.MissionAttackY = tonumber(v) or 0 end })
-    Sec:AddLabel('Objectives: sniff 5 · mud 3 · eat+drink to 50 · hit NPC 5. (travel/survive = next)', Color3.fromRGB(150, 150, 180))
+    Sec:AddLabel('1 by 1 = full mission per region. Rotational = mud across regions, eat/drink in one.', Color3.fromRGB(150, 150, 180))
+    Sec:AddSlider({ Name = 'Sniff count', Key = 'MSN', Min = 0, Max = 20, Default = 7, Decimals = 0, Callback = function(v) S.MissionSniffN = v end })
+    Sec:AddSlider({ Name = 'Mud count',   Key = 'MMN', Min = 0, Max = 20, Default = 5, Decimals = 0, Callback = function(v) S.MissionMudN = v end })
+    Sec:AddSlider({ Name = 'Eat count',   Key = 'MEN', Min = 0, Max = 20, Default = 5, Decimals = 0, Callback = function(v) S.MissionEatN = v end })
+    Sec:AddSlider({ Name = 'Drink count', Key = 'MDN', Min = 0, Max = 20, Default = 5, Decimals = 0, Callback = function(v) S.MissionDrinkN = v end })
+    Sec:AddLabel('Hit-NPC = coming later (phase 2).', Color3.fromRGB(150, 150, 180))
 end
 
 -- ═══════════════════════════════════════════════════════════════════
