@@ -56,7 +56,8 @@ local function dumpArgs(a, n)
 end
 
 local function record(self, method, ...)
-    if cc and cc() then return end                 -- skip our own (executor) fires
+    -- (no checkcaller gate: this tool never fires game remotes, and a buggy checkcaller can
+    --  wrongly skip EVERYTHING. so we record all FireServer/InvokeServer the game makes.)
     local ok, path = pcall(function() return self:GetFullName() end)
     if not ok then return end
     local s = summary[path]
@@ -82,31 +83,46 @@ local function findSample(cls)
         if found then return found end
     end
 end
+local hk = { nc = 'off', fire = 'off' }
+local function isRemote(self)
+    local ok, cls = pcall(function() return self.ClassName end)
+    return ok and (cls == 'RemoteEvent' or cls == 'RemoteFunction' or cls == 'UnreliableRemoteEvent')
+end
+-- (1) robust namecall hook via hookmetamethod (catches `remote:FireServer()` colon calls)
+pcall(function()
+    if not hookmetamethod then return end
+    local old
+    old = hookmetamethod(game, '__namecall', function(self, ...)
+        local m = getnamecallmethod and getnamecallmethod() or ''
+        if (m == 'FireServer' or m == 'InvokeServer') and isRemote(self) then pcall(record, self, m, ...) end
+        return old(self, ...)
+    end)
+    hk.nc = 'hookmeta'
+end)
+-- (1b) fallback: manual __namecall if hookmetamethod missing
+if hk.nc == 'off' then
+    pcall(function()
+        local mt = getrawmetatable(game); if not mt or not mt.__namecall then return end
+        local sr = setreadonly or make_writeable; if sr then pcall(sr, mt, false) end
+        local old = mt.__namecall
+        local newfn = function(self, ...)
+            local m = getnamecallmethod and getnamecallmethod() or ''
+            if (m == 'FireServer' or m == 'InvokeServer') and isRemote(self) then pcall(record, self, m, ...) end
+            return old(self, ...)
+        end
+        mt.__namecall = (newcclosure and newcclosure(newfn)) or newfn
+        hk.nc = 'manual'
+    end)
+end
+-- (2) FireServer/InvokeServer closure hooks (catches dot-calls `remote.FireServer(remote,...)`)
 pcall(function()
     if not hookfunction then return end
     local re = findSample('RemoteEvent')
-    if re then local o; o = hookfunction(re.FireServer, function(self, ...) record(self, 'FireServer', ...); return o(self, ...) end) end
+    if re then local o; o = hookfunction(re.FireServer, function(self, ...) pcall(record, self, 'FireServer', ...); return o(self, ...) end); hk.fire = 'ok' end
     local rf = findSample('RemoteFunction')
-    if rf then local o; o = hookfunction(rf.InvokeServer, function(self, ...) record(self, 'InvokeServer', ...); return o(self, ...) end) end
+    if rf then local o; o = hookfunction(rf.InvokeServer, function(self, ...) pcall(record, self, 'InvokeServer', ...); return o(self, ...) end) end
     local ur = findSample('UnreliableRemoteEvent')
-    if ur then local o; o = hookfunction(ur.FireServer, function(self, ...) record(self, 'FireServer(Unrel)', ...); return o(self, ...) end) end
-end)
-pcall(function()
-    local mt = getrawmetatable(game); if not mt or not mt.__namecall then return end
-    local sr = setreadonly or make_writeable; if sr then pcall(sr, mt, false) end
-    local old = mt.__namecall
-    local FIRE = { FireServer = true, InvokeServer = true }
-    local newfn = function(self, ...)
-        local m = getnamecallmethod and getnamecallmethod() or ''
-        if FIRE[m] then
-            local ok, cls = pcall(function() return self.ClassName end)
-            if ok and (cls == 'RemoteEvent' or cls == 'RemoteFunction' or cls == 'UnreliableRemoteEvent') then
-                record(self, m, ...)
-            end
-        end
-        return old(self, ...)
-    end
-    mt.__namecall = (newcclosure and newcclosure(newfn)) or newfn
+    if ur then local o; o = hookfunction(ur.FireServer, function(self, ...) pcall(record, self, 'FireServer(Unrel)', ...); return o(self, ...) end) end
 end)
 
 -- ── save ──
@@ -164,7 +180,7 @@ local shown = 0
 task.spawn(function()
     while gui.Parent do
         task.wait(0.2)
-        cnt.Text = ('fires: %d   (hit a Hollow, then SAVE)'):format(total)
+        cnt.Text = ('fires: %d   [hooks nc=%s fire=%s]'):format(total, hk.nc, hk.fire)
         while shown < #liveLog do
             shown = shown + 1
             local l = Instance.new('TextLabel', scroll)
