@@ -34,6 +34,9 @@ local S = {
     TP        = false,   -- teleport onto each target before swinging (stronger, riskier)
     Aim       = true,    -- send UpdateMousePosition toward target
     NameOnly  = false,   -- only hit models whose name contains "Hollow"
+    SwingGap  = 0.28,    -- delay between the hits of the 4-hit M1 string
+    Recovery  = 0.7,     -- pause after the 4th hit = the sword's combo cooldown (tune to the game)
+    Spam      = false,   -- ignore the cooldown + swing fast (test if the cooldown is client-side)
 }
 local combo = 1
 
@@ -82,16 +85,15 @@ end
 -- ═══════════ KILLAURA LOOP ═══════════
 task.spawn(function()
     while true do
-        task.wait(0.18)
         if S.On and Swing then
-            pcall(function()
+            local ok = pcall(function()
                 local enemies = enemiesInRange()
-                if #enemies == 0 then return end
+                if #enemies == 0 then task.wait(0.2); return end
                 local root = getRoot()
                 local home = root and root.CFrame
                 local n = math.min(#enemies, S.MaxTargets)
-                -- THE FIX: Swing's 2nd arg is the HIT-LIST (captured {} on an air-swing). Fill it with
-                -- the in-range enemy Models so the server actually applies damage, not just animation.
+                -- Swing's 2nd arg is the HIT-LIST (captured {} on an air-swing). Fill it with the
+                -- in-range enemy Models so the server applies damage, not just animation.
                 local targets = {}
                 for i = 1, n do targets[i] = enemies[i].m end
                 aimAt(enemies[1].hrp)
@@ -99,9 +101,16 @@ task.spawn(function()
                     pcall(function() root.CFrame = enemies[1].hrp.CFrame * CFrame.new(0, 0, 4) end); task.wait(0.05)
                 end
                 pcall(function() Swing:FireServer(combo, targets) end)
-                combo = combo % 4 + 1     -- cycle the M1 string 1->2->3->4
                 if S.TP and root and home then pcall(function() if getRoot() then getRoot().CFrame = home end end) end
+                -- advance the 4-hit string; after the 4th, wait the combo cooldown (Recovery) so the
+                -- server doesn't reject our hits = CONSISTENT. Spam mode skips it (test client-side cd).
+                combo = combo + 1
+                if combo > 4 then combo = 1; task.wait(S.Spam and 0.06 or S.Recovery)
+                else task.wait(S.Spam and 0.06 or S.SwingGap) end
             end)
+            if not ok then task.wait(0.2) end
+        else
+            task.wait(0.2)
         end
     end
 end)
@@ -114,7 +123,7 @@ gui.Parent = (gethui and gethui()) or LP:WaitForChild('PlayerGui')
 shared.__HSHub_HE_Killaura = gui
 
 local f = Instance.new('Frame', gui)
-f.Size = UDim2.new(0, 230, 0, 196)
+f.Size = UDim2.new(0, 230, 0, 226)
 f.Position = UDim2.new(0, 24, 0.4, 0)
 f.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
 f.BorderSizePixel = 0
@@ -146,9 +155,10 @@ local function rowBtn(text, getOn, onClick)
     y = y + 30
     return b
 end
-rowBtn('Killaura',  function() return S.On end,       function() S.On = not S.On end)
-rowBtn('Teleport',  function() return S.TP end,       function() S.TP = not S.TP end)
+rowBtn('Killaura',   function() return S.On end,       function() S.On = not S.On end)
+rowBtn('Teleport',   function() return S.TP end,       function() S.TP = not S.TP end)
 rowBtn('Hollow only',function() return S.NameOnly end, function() S.NameOnly = not S.NameOnly end)
+rowBtn('Spam (no cd)',function() return S.Spam end,    function() S.Spam = not S.Spam end)
 
 -- range +/- row
 local rl = Instance.new('TextLabel', f)
