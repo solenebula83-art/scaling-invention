@@ -35,10 +35,23 @@ local RacesInfo; pcall(function() RacesInfo = require(RsPackage.Modules.RacesInf
 
 local S = {
     Killaura = false, NoCd = false, TP = false, AutoFace = true, Range = 130, ExtraReach = 12, NoCdRate = 0.14,
-    AlwaysParry = false, AutoBlock = false, BlockRange = 22, BlockHold = 0.6,
+    HitRun = false, Retreat = 32, HitRunWait = 0.5,
+    AlwaysParry = false, AutoBlock = false, BlockRange = 22, BlockHold = 0.6, AntiKick = false,
     SpeedOn = false, Speed = 16, InfJump = false, Fly = false, FlySpeed = 70,
     ESP = false, ESPRange = 700,
 }
+
+-- ANTI-KICK: every client anti-cheat in this game is a CLIENT-SIDE LocalPlayer:Kick() (flyhack /
+-- exploiting / AnimationHandler). Dropping the Kick namecall when it targets us neutralizes them all.
+-- (Server-side kicks/rubber-banding are NOT blockable from here — that's the real wall.)
+pcall(function()
+    if not hookmetamethod then return end
+    local old
+    old = hookmetamethod(game, '__namecall', function(self, ...)
+        if S.AntiKick and self == LP and getnamecallmethod and getnamecallmethod() == 'Kick' then return end
+        return old(self, ...)
+    end)
+end)
 
 -- ═══════════ shared helpers ═══════════
 local function hum()  local c = LP.Character; return c and c:FindFirstChildOfClass('Humanoid') end
@@ -109,12 +122,19 @@ task.spawn(function()
             local hrp = nearestEnemy(S.Range)
             if hrp then
                 local r = root()
-                if S.TP and r then local dir = r.Position - hrp.Position
+                if (S.TP or S.HitRun) and r then local dir = r.Position - hrp.Position   -- dart IN
                     if dir.Magnitude > 10 then pcall(function() r.CFrame = CFrame.lookAt(hrp.Position + dir.Unit * 6, hrp.Position) end) end end
                 if S.AutoFace then face(hrp.Position) end
                 local class = LP:GetAttribute('Class')
                 if S.NoCd then if canAct() then pcall(function() m1tbl.standard(class) end) end; dt = S.NoCdRate
                 else if (not m1tbl.CanAttack) and canAct() then pcall(function() m1tbl.standard(class) end) end; dt = 0.05 end
+                if S.HitRun then                                                          -- dart OUT of reach
+                    task.wait(0.12)
+                    local rr = root()
+                    if rr then local away = rr.Position - hrp.Position; away = (away.Magnitude > 0.1) and away.Unit or Vector3.new(0, 0, 1)
+                        pcall(function() rr.CFrame = CFrame.new(hrp.Position + away * S.Retreat + Vector3.new(0, 6, 0)) end) end
+                    dt = S.HitRunWait
+                end
             else dt = 0.15 end
         end
         task.wait(dt)
@@ -261,11 +281,14 @@ addToggle(cT, 'Teleport (reach)', function() return S.TP end, function() S.TP = 
 addToggle(cT, 'Auto Face', function() return S.AutoFace end, function() S.AutoFace = not S.AutoFace end)
 addSlider(cT, function() return 'Range: ' .. S.Range end, function() S.Range = math.max(20, S.Range - 20) end, function() S.Range = math.min(500, S.Range + 20) end)
 addSlider(cT, function() return 'Extra Reach: +' .. S.ExtraReach end, function() S.ExtraReach = math.max(1, S.ExtraReach - 1); applyReach() end, function() S.ExtraReach = math.min(50, S.ExtraReach + 1); applyReach() end)
+addToggle(cT, 'Hit & Run (boss)', function() return S.HitRun end, function() S.HitRun = not S.HitRun end)
+addSlider(cT, function() return 'Retreat Dist: ' .. S.Retreat end, function() S.Retreat = math.max(15, S.Retreat - 5) end, function() S.Retreat = math.min(80, S.Retreat + 5) end)
 
 -- DEFENSE tab
 local dT = makeTab('Defense')
 addToggle(dT, 'Always Parry', function() return S.AlwaysParry end, function() S.AlwaysParry = not S.AlwaysParry; setAlwaysParry(S.AlwaysParry) end)
 addToggle(dT, 'Auto Block (reactive)', function() return S.AutoBlock end, function() S.AutoBlock = not S.AutoBlock end)
+addToggle(dT, 'Anti-Kick (client AC)', function() return S.AntiKick end, function() S.AntiKick = not S.AntiKick end)
 addSlider(dT, function() return 'Block Range: ' .. S.BlockRange end, function() S.BlockRange = math.max(8, S.BlockRange - 2) end, function() S.BlockRange = math.min(60, S.BlockRange + 2) end)
 
 -- MOVEMENT tab
