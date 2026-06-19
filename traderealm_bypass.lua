@@ -79,12 +79,30 @@ local function enter()
     return ok, ok and ('teleporting -> ' .. tostring(Constants.TradeRealmId)) or 'fire failed'
 end
 
+-- TEST: block client-initiated teleports BACK to the main realm. Survives the on-arrival kick ONLY
+-- if that kick is client-side. If the realm boots you server-side, this can't stop it (that's the test).
+local blockReturn = false
+pcall(function()
+    if not hookmetamethod then return end
+    local TS = game:GetService('TeleportService')
+    local old
+    old = hookmetamethod(game, '__namecall', function(self, ...)
+        if blockReturn and Constants then
+            local m = getnamecallmethod and getnamecallmethod()
+            local a = { ... }
+            if self == teleport and m == 'FireServer' and a[1] == Constants.MainGameId then return end
+            if self == TS and (m == 'Teleport' or m == 'TeleportAsync' or m == 'TeleportToPlaceInstance') and a[1] == Constants.MainGameId then return end
+        end
+        return old(self, ...)
+    end)
+end)
+
 -- ═══════════ UI ═══════════
 local gui = Instance.new('ScreenGui'); gui.Name = 'HSHub_CoS_TR'; gui.ResetOnSpawn = false
 gui.Parent = (gethui and gethui()) or LP:WaitForChild('PlayerGui')
 shared.__HSHub_CoS_TR = gui
 
-local f = Instance.new('Frame', gui); f.Size = UDim2.new(0, 256, 0, 156); f.Position = UDim2.new(0, 24, 0.4, 0)
+local f = Instance.new('Frame', gui); f.Size = UDim2.new(0, 256, 0, 192); f.Position = UDim2.new(0, 24, 0.38, 0)
 f.BackgroundColor3 = Color3.fromRGB(16, 18, 26); f.BorderSizePixel = 0; f.Active = true; f.Draggable = true
 Instance.new('UICorner', f).CornerRadius = UDim.new(0, 8)
 local stk = Instance.new('UIStroke', f); stk.Color = Color3.fromRGB(120, 200, 120); stk.Thickness = 1.5
@@ -107,6 +125,11 @@ end
 mkBtn(72, 'UNLOCK (set flags + reqs)', Color3.fromRGB(50, 110, 70), function()
     local ok, msg = unlock(); stat.Text = msg
 end)
-mkBtn(110, 'ENTER Trade Realm', Color3.fromRGB(55, 90, 140), function()
+local brBtn = Instance.new('TextButton', f); brBtn.Position = UDim2.new(0, 10, 0, 108); brBtn.Size = UDim2.new(1, -20, 0, 32)
+brBtn.BorderSizePixel = 0; brBtn.Font = Enum.Font.GothamBold; brBtn.TextSize = 13; brBtn.TextColor3 = Color3.fromRGB(245, 245, 250)
+Instance.new('UICorner', brBtn).CornerRadius = UDim.new(0, 6)
+local function refBR() brBtn.Text = 'Block Return: ' .. (blockReturn and 'ON' or 'OFF'); brBtn.BackgroundColor3 = blockReturn and Color3.fromRGB(150, 90, 40) or Color3.fromRGB(34, 38, 50) end
+brBtn.MouseButton1Click:Connect(function() blockReturn = not blockReturn; refBR() end); refBR()
+mkBtn(146, 'ENTER Trade Realm', Color3.fromRGB(55, 90, 140), function()
     local ok, msg = enter(); stat.Text = msg
 end)
